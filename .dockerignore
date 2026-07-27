@@ -1,0 +1,35 @@
+# Node / Next.js
+node_modules
+.next
+.turbo
+dist
+build
+coverage
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+.venv
+venv
+.mypy_cache
+.ruff_cache
+
+# Version control & Local config
+.git
+.gitignore
+.github
+.env*
+!.env.example
+docker-compose.yml
+README.md
+
+# OS & Temp
+.DS_Store
+Thumbs.db
+tmp
+scratch
