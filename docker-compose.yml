@@ -60,6 +60,10 @@ services:
       SAKANA_API_KEY: ${SAKANA_API_KEY:-}
     ports:
       - "${API_PORT:-8000}:8000"
+    # $$PORT, not ${PORT}: compose interpolates ${...} from the *host* shell,
+    # where PORT is unset, so the command rendered as "-b 0.0.0.0:" and gunicorn
+    # could not bind. $$ escapes the substitution and lets the container's shell
+    # read the values set under `environment:` above.
     command:
       - sh
       - -c
@@ -67,7 +71,7 @@ services:
         alembic upgrade head
         exec gunicorn services.identity_service.main:app \
           -k services.identity_service.worker.SecureUvicornWorker \
-          -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT} \
+          -w $$WEB_CONCURRENCY -b 0.0.0.0:$$PORT \
           --timeout 120 --graceful-timeout 30 --access-logfile -
 
 volumes:
