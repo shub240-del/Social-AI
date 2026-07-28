@@ -134,7 +134,8 @@ docker compose up --build     # Postgres + API, migrations run on start
 
 ```bash
 poetry run pytest -q                     # unit + integration
-poetry run ruff check .
+poetry run ruff check .                  # lint + import order + formatting rules
+poetry run mypy packages services tests  # strict; enforced in CI
 pnpm run lint && pnpm run typecheck && pnpm run build
 
 # Against a running server:
@@ -153,6 +154,12 @@ production, and that the deployment is not silently running the mock LLM.
 
 Migration drift is enforced in CI with `alembic check`, which fails when the ORM
 models and the migration history disagree.
+
+`ruff` is the only Python formatter and linter; `black` was removed because
+`ruff-format` already covers it and running both meant two formatters competing
+for the same files. `mypy` is the only type checker, and CI runs it — it was
+configured `strict` from the start but never invoked, which had let 27 type
+errors accumulate unnoticed.
 
 ---
 

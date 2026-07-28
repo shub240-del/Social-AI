@@ -53,8 +53,7 @@ COPY --chown=appuser:appuser packages ./packages
 COPY --chown=appuser:appuser services ./services
 COPY --chown=appuser:appuser migrations ./migrations
 
-# Imports resolve from /app, matching `prepend_sys_path = .` in alembic.ini and
-# the extraPaths in pyrightconfig.json.
+# Imports resolve from /app, matching `prepend_sys_path = .` in alembic.ini.
 ENV PYTHONPATH=/app
 
 USER appuser
