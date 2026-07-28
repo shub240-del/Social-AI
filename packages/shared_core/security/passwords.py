@@ -37,13 +37,4 @@ def verify_password(password: str, hashed: str | None) -> bool:
         return False
 
 
-def needs_rehash(hashed: str, *, rounds: int = DEFAULT_ROUNDS) -> bool:
-    """True when a stored hash uses a weaker cost than we now require."""
-    try:
-        cost = int(hashed.split("$")[2])
-    except (IndexError, ValueError):
-        return True
-    return cost < rounds
-
-
-__all__ = ["MIN_PASSWORD_LENGTH", "hash_password", "needs_rehash", "verify_password"]
+__all__ = ["MIN_PASSWORD_LENGTH", "hash_password", "verify_password"]

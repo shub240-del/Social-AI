@@ -123,12 +123,6 @@ class RateLimitError(AppError):
     message = "Too many requests. Please slow down."
 
 
-class ServiceUnavailableError(AppError):
-    status_code = 503
-    code = "service_unavailable"
-    message = "A dependency is unavailable. Please try again shortly."
-
-
 class LLMError(AppError):
     status_code = 502
     code = "llm_error"
@@ -168,7 +162,6 @@ __all__ = [
     "NotFoundError",
     "PermissionDeniedError",
     "RateLimitError",
-    "ServiceUnavailableError",
     "TokenExpiredError",
     "ValidationError",
 ]

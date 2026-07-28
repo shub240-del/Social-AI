@@ -106,14 +106,6 @@ def has_permission(role: Role | str, permission: Permission) -> bool:
     return permission in permissions_for(role)
 
 
-def require_permission(role: Role | str, permission: Permission) -> None:
-    if not has_permission(role, permission):
-        raise PermissionDeniedError(
-            f"Your role ({role}) does not allow {permission}.",
-            details={"required_permission": str(permission), "role": str(role)},
-        )
-
-
 def outranks(actor: Role | str, target: Role | str) -> bool:
     a = parse_role(actor) if isinstance(actor, str) else actor
     t = parse_role(target) if isinstance(target, str) else target
@@ -152,5 +144,4 @@ __all__ = [
     "outranks",
     "parse_role",
     "permissions_for",
-    "require_permission",
 ]

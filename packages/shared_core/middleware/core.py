@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from packages.shared_core.config import get_settings
+from packages.shared_core.exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -157,14 +158,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if len(window) >= limit:
             retry_after = max(1, int(60.0 - (now - window[0])))
             logger.warning("rate limit hit on the %s bucket for %s (%s)", bucket, key, path)
+            # Built from the exception rather than hand-written, so the code
+            # and message cannot drift from the one every other 429 uses.
+            # Middleware returns instead of raising: BaseHTTPMiddleware sits
+            # outside the app's exception handlers, so a raise here would
+            # escape as a bare 500.
+            error = RateLimitError()
             return JSONResponse(
-                status_code=429,
-                content={
-                    "error": {
-                        "code": "rate_limited",
-                        "message": "Too many requests. Please slow down.",
-                    }
-                },
+                status_code=error.status_code,
+                content=error.to_dict(),
                 headers={"Retry-After": str(retry_after)},
             )
 

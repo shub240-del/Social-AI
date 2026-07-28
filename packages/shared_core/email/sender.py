@@ -114,16 +114,6 @@ def reset_email_sender() -> None:
     _cached_sender.cache_clear()
 
 
-def send_safely(message: Email) -> bool:
-    """Send without ever propagating a provider failure to the caller."""
-    try:
-        get_email_sender().send(message)
-        return True
-    except Exception:  # noqa: BLE001 - delivery must never break a request
-        logger.exception("could not deliver email to %s", message.to)
-        return False
-
-
 __all__ = [
     "ConsoleEmailSender",
     "Email",
@@ -132,5 +122,4 @@ __all__ = [
     "SMTPEmailSender",
     "get_email_sender",
     "reset_email_sender",
-    "send_safely",
 ]
