@@ -85,6 +85,23 @@ async def client(app):
 
 
 @pytest.fixture
+async def db_session():
+    """A session for tests that call service functions directly.
+
+    Rolled back on teardown; the autouse ``_database`` fixture rebuilds the
+    schema anyway, so this only keeps a failing test from leaving a half
+    written transaction behind.
+    """
+    from packages.shared_core.db.base import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        try:
+            yield session
+        finally:
+            await session.rollback()
+
+
+@pytest.fixture
 def mailbox() -> sender_mod.MemoryEmailSender:
     sender = sender_mod.get_email_sender()
     assert isinstance(sender, sender_mod.MemoryEmailSender)

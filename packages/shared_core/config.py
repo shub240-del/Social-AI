@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = 120
     auth_rate_limit_per_minute: int = 10
+    # Chat is the only route that spends money with a third party on every
+    # call, so it is budgeted separately from ordinary reads.
+    chat_rate_limit_per_minute: int = 20
     sentry_dsn: str | None = None
     sentry_traces_sample_rate: float = 0.1
 

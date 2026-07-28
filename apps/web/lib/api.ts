@@ -321,8 +321,12 @@ export const api = {
   listCampaigns: (workspaceId: string) =>
     request<Campaign[]>(`/workspaces/${workspaceId}/campaigns`),
 
-  createCampaign: (workspaceId: string, body: { name: string; objective?: string }) =>
-    request<Campaign>(`/workspaces/${workspaceId}/campaigns`, { method: 'POST', body }),
+  // brand_id and channel are accepted by CampaignCreate on the server; the
+  // client used to omit them, so a campaign could never be linked to a brand.
+  createCampaign: (
+    workspaceId: string,
+    body: { name: string; objective?: string; channel?: string; brand_id?: string },
+  ) => request<Campaign>(`/workspaces/${workspaceId}/campaigns`, { method: 'POST', body }),
 
   // chat
   chat: (

@@ -65,20 +65,29 @@ def _wrap(tag: str, body: str) -> str:
 async def _build_system_prompt(session, workspace_id: str, brand_id, campaign_id) -> str:
     parts = [BASE_SYSTEM_PROMPT]
 
+    # An id that does not resolve is rejected rather than skipped. Silently
+    # dropping it produced ungrounded output that looked successful: the user
+    # selected a brand, the request succeeded, and nothing about the answer
+    # reflected the selection. The same query also scopes to workspace_id, so a
+    # reference to another tenant's brand is rejected here instead of leaking
+    # that tenant's positioning into this prompt.
     if brand_id:
         result = await session.execute(
             select(Brand).where(Brand.id == brand_id, Brand.workspace_id == workspace_id)
         )
         brand = result.scalar_one_or_none()
-        if brand is not None:
-            parts.append(
-                _wrap(
-                    "brand",
-                    f"Name: {brand.name}\nDescription: {brand.description}\n"
-                    f"Tone: {brand.tone}\nAudience: {brand.audience}\n"
-                    f"Keywords: {brand.keywords}",
-                )
+        if brand is None:
+            raise ValidationError(
+                "Unknown brand for this workspace.", details={"field": "brand_id"}
             )
+        parts.append(
+            _wrap(
+                "brand",
+                f"Name: {brand.name}\nDescription: {brand.description}\n"
+                f"Tone: {brand.tone}\nAudience: {brand.audience}\n"
+                f"Keywords: {brand.keywords}",
+            )
+        )
 
     if campaign_id:
         result = await session.execute(
@@ -87,14 +96,17 @@ async def _build_system_prompt(session, workspace_id: str, brand_id, campaign_id
             )
         )
         campaign = result.scalar_one_or_none()
-        if campaign is not None:
-            parts.append(
-                _wrap(
-                    "campaign",
-                    f"Name: {campaign.name}\nObjective: {campaign.objective}\n"
-                    f"Channel: {campaign.channel}",
-                )
+        if campaign is None:
+            raise ValidationError(
+                "Unknown campaign for this workspace.", details={"field": "campaign_id"}
             )
+        parts.append(
+            _wrap(
+                "campaign",
+                f"Name: {campaign.name}\nObjective: {campaign.objective}\n"
+                f"Channel: {campaign.channel}",
+            )
+        )
 
     return "\n\n".join(parts)
 

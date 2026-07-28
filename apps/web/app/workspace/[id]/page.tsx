@@ -4,11 +4,13 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Loader2, MessageSquarePlus, Send, Sparkles, Trash2 } from 'lucide-react';
+import { CampaignPanel } from '@/components/CampaignPanel';
 import { EmptyState, ErrorBanner, Spinner } from '@/components/Field';
 import {
   api,
   ApiError,
   type Brand,
+  type Campaign,
   type ChatMessage,
   type Conversation,
 } from '@/lib/api';
@@ -24,6 +26,8 @@ export default function WorkspacePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [brandId, setBrandId] = useState<string>('');
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [campaignId, setCampaignId] = useState<string>('');
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,12 +37,14 @@ export default function WorkspacePage() {
 
   const loadSidebar = useCallback(async () => {
     try {
-      const [convos, brandList] = await Promise.all([
+      const [convos, brandList, campaignList] = await Promise.all([
         api.listConversations(workspaceId),
         api.listBrands(workspaceId),
+        api.listCampaigns(workspaceId),
       ]);
       setConversations(convos);
       setBrands(brandList);
+      setCampaigns(campaignList);
       if (brandList.length && !brandId) setBrandId(brandList[0].id);
     } catch (err) {
       setError(
@@ -103,6 +109,7 @@ export default function WorkspacePage() {
         prompt: text,
         conversation_id: activeId ?? undefined,
         brand_id: brandId || undefined,
+        campaign_id: campaignId || undefined,
       });
       setActiveId(result.conversation_id);
       setMessages((prev) => [...prev, result.message]);
@@ -111,7 +118,12 @@ export default function WorkspacePage() {
       // Roll the optimistic message back so the transcript matches the server.
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setPrompt(text);
-      if (err instanceof ApiError && err.status === 403) {
+      if (err instanceof ApiError && err.status === 422) {
+        // The selected brand or campaign no longer resolves in this
+        // workspace; the server refuses rather than answering ungrounded.
+        setError('That brand or campaign is no longer available. Pick another.');
+        await loadSidebar();
+      } else if (err instanceof ApiError && err.status === 403) {
         setError('Your role in this workspace does not allow sending messages.');
       } else if (err instanceof ApiError && err.status === 429) {
         setError('Too many requests. Please wait a moment.');
@@ -156,25 +168,47 @@ export default function WorkspacePage() {
               <Sparkles className="h-4 w-4 text-indigo-400" /> Workspace
             </span>
           </div>
-          {brands.length > 0 && (
-            <div className="flex items-center gap-2">
-              <label htmlFor="brand" className="text-xs text-slate-500">
-                Brand voice
-              </label>
-              <select
-                id="brand"
-                className="input w-auto py-1.5 text-xs"
-                value={brandId}
-                onChange={(e) => setBrandId(e.target.value)}
-              >
-                {brands.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          <div className="flex items-center gap-4">
+            {brands.length > 0 && (
+              <div className="flex items-center gap-2">
+                <label htmlFor="brand" className="text-xs text-slate-500">
+                  Brand voice
+                </label>
+                <select
+                  id="brand"
+                  className="input w-auto py-1.5 text-xs"
+                  value={brandId}
+                  onChange={(e) => setBrandId(e.target.value)}
+                >
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {campaigns.length > 0 && (
+              <div className="flex items-center gap-2">
+                <label htmlFor="campaign" className="text-xs text-slate-500">
+                  Campaign
+                </label>
+                <select
+                  id="campaign"
+                  className="input w-auto py-1.5 text-xs"
+                  value={campaignId}
+                  onChange={(e) => setCampaignId(e.target.value)}
+                >
+                  <option value="">None</option>
+                  {campaigns.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -210,6 +244,14 @@ export default function WorkspacePage() {
               <p className="px-2 py-6 text-center text-xs text-slate-600">No conversations yet.</p>
             )}
           </nav>
+          <div className="border-t border-slate-800 p-3">
+            <CampaignPanel
+              workspaceId={workspaceId}
+              campaigns={campaigns}
+              brands={brands}
+              onCreated={loadSidebar}
+            />
+          </div>
         </aside>
 
         <section className="flex min-h-0 flex-1 flex-col">

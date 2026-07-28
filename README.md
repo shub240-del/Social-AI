@@ -160,9 +160,10 @@ console email backend, or a non-HTTPS frontend URL.
 
 ## Known limitations
 
-- Rate limiting is an in-process fixed window, so the effective limit is the
-  configured value multiplied by the replica count. A shared store is required
-  before scaling horizontally.
+- Rate limiting is an in-process fixed window over three per-client buckets
+  (credential, chat, default), so the effective limit is the configured value
+  multiplied by the replica count. A shared store is required before scaling
+  horizontally.
 - Next.js carries an open advisory for the Image Optimizer and RSC
   deserialization with no fixed stable release at time of writing. This app
   configures no `remotePatterns`, so the image path is not reachable.

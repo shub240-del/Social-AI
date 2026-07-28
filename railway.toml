@@ -39,6 +39,7 @@ numReplicas = 1
 #   NVIDIA_API_BASE_URL / DEFAULT_LLM_MODEL
 #   ALLOW_MOCK_LLM=false     (a true value is rejected at boot)
 #   EMAIL_BACKEND=smtp + SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / EMAIL_FROM
+#   RATE_LIMIT_PER_MINUTE / AUTH_RATE_LIMIT_PER_MINUTE / CHAT_RATE_LIMIT_PER_MINUTE
 #   WEB_CONCURRENCY=4
 #
 # Auth0 is optional and off by default; authentication is self hosted. Set
