@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared_core.config import get_settings
 from packages.shared_core.db.base import new_uuid
@@ -31,6 +33,7 @@ from services.identity_service.auth.tokens import (
     generate_refresh_token,
     hash_refresh_token,
 )
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     LoginRequest,
     LogoutRequest,
@@ -47,11 +50,11 @@ from services.identity_service.services.user_provisioning import provision_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"], route_class=CommitRoute)
 
 
 async def _issue_refresh_token(
-    session, user: User, *, family_id: str | None = None, request: Request | None = None
+    session: AsyncSession, user: User, *, family_id: str | None = None, request: Request | None = None
 ) -> str:
     settings = get_settings()
     raw = generate_refresh_token()
@@ -247,8 +250,8 @@ async def me(user: CurrentUser, session: SessionDep) -> MeResponse:
     )
 
 
-@router.get("/sessions", response_model=list[dict])
-async def list_sessions(user: CurrentUser, session: SessionDep) -> list[dict]:
+@router.get("/sessions", response_model=list[dict[str, Any]])
+async def list_sessions(user: CurrentUser, session: SessionDep) -> list[dict[str, Any]]:
     """Active sessions, so a user can spot one they do not recognise."""
     result = await session.execute(
         select(RefreshToken)

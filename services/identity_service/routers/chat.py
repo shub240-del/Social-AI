@@ -10,12 +10,15 @@ tools and no database access, so the worst case is bad copy, not data loss.
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from packages.shared_core.ai import ChatMessage, get_llm_client
@@ -26,6 +29,7 @@ from services.identity_service.auth.dependencies import (
     SessionDep,
     requires,
 )
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     ChatRequest,
     ChatResponse,
@@ -37,7 +41,7 @@ from services.identity_service.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workspaces/{workspace_id}", tags=["chat"])
+router = APIRouter(prefix="/workspaces/{workspace_id}", tags=["chat"], route_class=CommitRoute)
 
 # How much history to replay. Older turns are dropped rather than summarised:
 # a silent summary changes what the user thinks the model can see.
@@ -62,7 +66,12 @@ def _wrap(tag: str, body: str) -> str:
     return f"<{tag}>\n{cleaned}\n</{tag}>"
 
 
-async def _build_system_prompt(session, workspace_id: str, brand_id, campaign_id) -> str:
+async def _build_system_prompt(
+    session: AsyncSession,
+    workspace_id: str,
+    brand_id: str | None,
+    campaign_id: str | None,
+) -> str:
     parts = [BASE_SYSTEM_PROMPT]
 
     # An id that does not resolve is rejected rather than skipped. Silently
@@ -72,10 +81,10 @@ async def _build_system_prompt(session, workspace_id: str, brand_id, campaign_id
     # reference to another tenant's brand is rejected here instead of leaking
     # that tenant's positioning into this prompt.
     if brand_id:
-        result = await session.execute(
+        brand_result = await session.execute(
             select(Brand).where(Brand.id == brand_id, Brand.workspace_id == workspace_id)
         )
-        brand = result.scalar_one_or_none()
+        brand = brand_result.scalar_one_or_none()
         if brand is None:
             raise ValidationError(
                 "Unknown brand for this workspace.", details={"field": "brand_id"}
@@ -90,12 +99,12 @@ async def _build_system_prompt(session, workspace_id: str, brand_id, campaign_id
         )
 
     if campaign_id:
-        result = await session.execute(
+        campaign_result = await session.execute(
             select(Campaign).where(
                 Campaign.id == campaign_id, Campaign.workspace_id == workspace_id
             )
         )
-        campaign = result.scalar_one_or_none()
+        campaign = campaign_result.scalar_one_or_none()
         if campaign is None:
             raise ValidationError(
                 "Unknown campaign for this workspace.", details={"field": "campaign_id"}
@@ -111,14 +120,16 @@ async def _build_system_prompt(session, workspace_id: str, brand_id, campaign_id
     return "\n\n".join(parts)
 
 
-async def _load_conversation(session, workspace_id: str, user_id: str, conversation_id: str):
+async def _load_conversation(
+    session: AsyncSession, workspace_id: str, user_id: str, conversation_id: str
+) -> Conversation:
     result = await session.execute(
         select(Conversation).where(
             Conversation.id == conversation_id,
             Conversation.workspace_id == workspace_id,
         )
     )
-    conversation = result.scalar_one_or_none()
+    conversation: Conversation | None = result.scalar_one_or_none()
     if conversation is None:
         raise NotFoundError("That conversation does not exist.")
     return conversation
@@ -264,9 +275,7 @@ async def chat_stream(
     client = get_llm_client()
     prompt_text = payload.prompt
 
-    async def event_stream():
-        import json
-
+    async def event_stream() -> AsyncIterator[str]:
         chunks: list[str] = []
         try:
             yield f"data: {json.dumps({'type': 'start', 'conversation_id': conversation_id})}\n\n"

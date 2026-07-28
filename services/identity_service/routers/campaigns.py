@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared_core.db.models import Brand, Campaign
 from packages.shared_core.exceptions import NotFoundError, ValidationError
@@ -19,6 +20,7 @@ from services.identity_service.auth.dependencies import (
     SessionDep,
     requires,
 )
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     CampaignCreate,
     CampaignResponse,
@@ -26,22 +28,22 @@ from services.identity_service.schemas import (
     MessageResponse,
 )
 
-router = APIRouter(prefix="/workspaces/{workspace_id}/campaigns", tags=["campaigns"])
+router = APIRouter(prefix="/workspaces/{workspace_id}/campaigns", tags=["campaigns"], route_class=CommitRoute)
 
 
-async def _get_owned(session, workspace_id: str, campaign_id: str) -> Campaign:
+async def _get_owned(session: AsyncSession, workspace_id: str, campaign_id: str) -> Campaign:
     result = await session.execute(
         select(Campaign).where(
             Campaign.id == campaign_id, Campaign.workspace_id == workspace_id
         )
     )
-    campaign = result.scalar_one_or_none()
+    campaign: Campaign | None = result.scalar_one_or_none()
     if campaign is None:
         raise NotFoundError("That campaign does not exist.")
     return campaign
 
 
-async def _validate_brand(session, workspace_id: str, brand_id: str | None) -> None:
+async def _validate_brand(session: AsyncSession, workspace_id: str, brand_id: str | None) -> None:
     """A brand from another tenant must not be attachable by id."""
     if brand_id is None:
         return

@@ -7,6 +7,8 @@ the mapping is not a secret.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter
 from sqlalchemy import func, select
 
@@ -14,8 +16,9 @@ from packages.shared_core.config import get_settings
 from packages.shared_core.db.models import Conversation, Message, User, Workspace
 from packages.shared_core.security.rbac import ROLE_PERMISSIONS, Role
 from services.identity_service.auth.dependencies import CurrentUser, SessionDep, SuperUser
+from services.identity_service.routing import CommitRoute
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(prefix="/admin", tags=["admin"], route_class=CommitRoute)
 
 
 @router.get("/roles")
@@ -56,7 +59,7 @@ async def config(user: SuperUser) -> dict[str, object]:
 
 @router.get("/stats")
 async def stats(user: SuperUser, session: SessionDep) -> dict[str, int]:
-    async def count(model) -> int:
+    async def count(model: type[Any]) -> int:
         result = await session.execute(select(func.count(model.id)))
         return int(result.scalar_one() or 0)
 

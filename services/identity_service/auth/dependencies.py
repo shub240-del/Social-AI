@@ -12,6 +12,7 @@ oracle.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, Path, Request
@@ -113,7 +114,7 @@ async def get_workspace_context(
 WorkspaceContext = Annotated[UserContext, Depends(get_workspace_context)]
 
 
-def requires(permission: Permission):
+def requires(permission: Permission) -> Callable[[UserContext], Awaitable[UserContext]]:
     """Dependency factory enforcing one permission in the path's workspace."""
 
     async def _check(context: WorkspaceContext) -> UserContext:

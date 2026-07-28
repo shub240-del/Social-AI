@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared_core.db.models import Brand
 from packages.shared_core.exceptions import NotFoundError
@@ -19,6 +20,7 @@ from services.identity_service.auth.dependencies import (
     SessionDep,
     requires,
 )
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     BrandCreate,
     BrandResponse,
@@ -26,14 +28,14 @@ from services.identity_service.schemas import (
     MessageResponse,
 )
 
-router = APIRouter(prefix="/workspaces/{workspace_id}/brands", tags=["brands"])
+router = APIRouter(prefix="/workspaces/{workspace_id}/brands", tags=["brands"], route_class=CommitRoute)
 
 
-async def _get_owned(session, workspace_id: str, brand_id: str) -> Brand:
+async def _get_owned(session: AsyncSession, workspace_id: str, brand_id: str) -> Brand:
     result = await session.execute(
         select(Brand).where(Brand.id == brand_id, Brand.workspace_id == workspace_id)
     )
-    brand = result.scalar_one_or_none()
+    brand: Brand | None = result.scalar_one_or_none()
     if brand is None:
         raise NotFoundError("That brand does not exist.")
     return brand

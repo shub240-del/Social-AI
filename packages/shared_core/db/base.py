@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from starlette.requests import Request
 
 from packages.shared_core.config import get_settings
 
@@ -107,14 +108,23 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return _sessionmaker
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
+async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     """FastAPI dependency: one transaction per request.
 
-    Committing here rather than in each route means a handler that raises can
-    never leave a half-written change behind.
+    The session is published on ``request.state`` so that
+    :class:`~services.identity_service.routing.CommitRoute` can commit it while
+    the request is still in flight. Since FastAPI 0.106 the teardown below runs
+    *after* the response has been sent, so committing only here meant the API
+    answered ``201 Created`` before the row was durable -- a caller that
+    immediately read its own write could miss it, and a commit that failed left
+    the client holding a success it never got.
+
+    The commit below is kept as a safety net for anything the route wrapper did
+    not already flush; committing an already-committed session is a no-op.
     """
     factory = get_sessionmaker()
     async with factory() as session:
+        request.state.db_session = session
         try:
             yield session
             await session.commit()

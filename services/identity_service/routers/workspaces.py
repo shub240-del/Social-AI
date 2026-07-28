@@ -9,7 +9,7 @@ cross-tenant bugs come from.
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
@@ -28,6 +28,7 @@ from services.identity_service.auth.dependencies import (
     WorkspaceContext,
     requires,
 )
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     MemberInvite,
     MemberResponse,
@@ -41,7 +42,7 @@ from services.identity_service.services.user_provisioning import create_workspac
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+router = APIRouter(prefix="/workspaces", tags=["workspaces"], route_class=CommitRoute)
 
 
 @router.get("", response_model=list[WorkspaceResponse])
@@ -134,7 +135,7 @@ async def delete(
 
 @router.get("/{workspace_id}/stats")
 async def stats(workspace_id: str, context: WorkspaceContext, session: SessionDep) -> dict[str, int]:
-    async def count(model) -> int:
+    async def count(model: type[Any]) -> int:
         result = await session.execute(
             select(func.count(model.id)).where(model.workspace_id == workspace_id)
         )

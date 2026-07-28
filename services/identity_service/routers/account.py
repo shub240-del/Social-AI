@@ -15,9 +15,11 @@ import hashlib
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 from fastapi import APIRouter, status
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared_core.config import get_settings
 from packages.shared_core.db.models import RefreshToken, User, VerificationToken
@@ -25,6 +27,7 @@ from packages.shared_core.email.sender import Email, get_email_sender
 from packages.shared_core.exceptions import InvalidTokenError, ValidationError
 from packages.shared_core.security.passwords import hash_password, verify_password
 from services.identity_service.auth.dependencies import CurrentUser, SessionDep
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     MessageResponse,
     PasswordChangeRequest,
@@ -36,7 +39,7 @@ from services.identity_service.schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["account"])
+router = APIRouter(prefix="/auth", tags=["account"], route_class=CommitRoute)
 
 PURPOSE_VERIFY = "email_verify"
 PURPOSE_RESET = "password_reset"
@@ -46,7 +49,7 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def _issue_token(session, user: User, purpose: str, ttl_seconds: int) -> str:
+async def _issue_token(session: AsyncSession, user: User, purpose: str, ttl_seconds: int) -> str:
     """Invalidate any outstanding token for this purpose, then mint a new one."""
     await session.execute(
         update(VerificationToken)
@@ -69,7 +72,7 @@ async def _issue_token(session, user: User, purpose: str, ttl_seconds: int) -> s
     return raw
 
 
-async def _consume_token(session, raw: str, purpose: str) -> User:
+async def _consume_token(session: AsyncSession, raw: str, purpose: str) -> User:
     result = await session.execute(
         select(VerificationToken).where(
             VerificationToken.token_hash == _hash(raw),
@@ -97,14 +100,17 @@ async def _consume_token(session, raw: str, purpose: str) -> User:
     # redeem it, and the second caller still saw used_at IS NULL. The database
     # evaluates this predicate at write time, so exactly one caller can flip
     # NULL -> now and the loser gets rowcount 0.
-    claimed = await session.execute(
-        update(VerificationToken)
-        .where(
-            VerificationToken.token_hash == _hash(raw),
-            VerificationToken.purpose == purpose,
-            VerificationToken.used_at.is_(None),
-        )
-        .values(used_at=now)
+    claimed = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(VerificationToken)
+            .where(
+                VerificationToken.token_hash == _hash(raw),
+                VerificationToken.purpose == purpose,
+                VerificationToken.used_at.is_(None),
+            )
+            .values(used_at=now)
+        ),
     )
     if claimed.rowcount != 1:
         raise InvalidTokenError("This link is invalid or has already been used.")
@@ -121,7 +127,7 @@ async def _consume_token(session, raw: str, purpose: str) -> User:
     return user
 
 
-async def send_verification_email(session, user: User) -> None:
+async def send_verification_email(session: AsyncSession, user: User) -> None:
     """Mint a fresh verification link and email it.
 
     Shared with registration so that signing up actually delivers a link;
