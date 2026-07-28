@@ -26,7 +26,9 @@ venv
 .env*
 !.env.example
 docker-compose.yml
-README.md
+# README.md is NOT excluded: pyproject.toml declares `readme = "README.md"` and
+# the Dockerfile copies it into the dependency layer, so excluding it here
+# breaks `COPY pyproject.toml poetry.lock* README.md ./` with a missing file.
 
 # OS & Temp
 .DS_Store

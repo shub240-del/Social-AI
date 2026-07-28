@@ -1,0 +1,32 @@
+# Extends the gitleaks default ruleset.
+# The default ruleset has no rule for NVIDIA NIM / build.nvidia.com keys, which is
+# the exact token format that leaked in .env.production. Added explicitly below.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "nvidia-api-key"
+description = "NVIDIA NIM / build.nvidia.com API key"
+regex = '''nvapi-[A-Za-z0-9_\-]{60,}'''
+keywords = ["nvapi-"]
+
+[[rules]]
+id = "auth0-client-secret"
+description = "Auth0 client secret"
+regex = '''(?i)auth0[_\-.]?client[_\-.]?secret['"\s:=]+[A-Za-z0-9_\-]{32,}'''
+keywords = ["auth0"]
+
+[allowlist]
+description = "Non-secret example and lockfile paths"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\..*\.example$''',
+  '''pnpm-lock\.yaml$''',
+  '''poetry\.lock$''',
+]
+# Placeholder values used in committed example files.
+regexes = [
+  '''REQUIRED_FROM_VAULT''',
+  '''mock_[a-z_]+_key''',
+  '''your_[a-z_]+_here''',
+]

@@ -11,6 +11,13 @@ repos:
       - id: check-merge-conflict
       - id: detect-private-key
 
+  # Secret scanning. detect-private-key above only matches PEM blocks and did NOT
+  # catch the committed NVIDIA API token. gitleaks scans for provider token formats.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.4.4
     hooks:
