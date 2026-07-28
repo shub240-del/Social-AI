@@ -12,7 +12,7 @@ repos:
       - id: detect-private-key
 
   # Secret scanning. detect-private-key above only matches PEM blocks and did NOT
-  # catch the committed NVIDIA API token. gitleaks scans for provider token formats.
+  # catch a committed provider API token. gitleaks scans for provider token formats.
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
     hooks:

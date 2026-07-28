@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from packages.shared_core.ai.nvidia_client import ChatMessage, MockLLMClient
+from packages.shared_core.ai import ChatMessage, MockLLMClient
 from packages.shared_core.security.rbac import (
     Permission,
     Role,

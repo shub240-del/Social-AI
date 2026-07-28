@@ -35,8 +35,9 @@ numReplicas = 1
 #   JWT_ISSUER / JWT_AUDIENCE
 #   DATABASE_URL             (Supabase :6543 transaction pooler, +asyncpg)
 #   MIGRATION_DATABASE_URL   (Supabase :5432 direct, +psycopg2, preDeploy only)
-#   NVIDIA_API_KEY           (the ROTATED key — the old one is compromised)
-#   NVIDIA_API_BASE_URL / DEFAULT_LLM_MODEL
+#   SAKANA_API_KEY           (from console.sakana.ai; needs an active subscription)
+#   SAKANA_API_BASE_URL / DEFAULT_LLM_MODEL   (defaults: api.sakana.ai/v1, fugu)
+#   LLM_TIMEOUT_SECONDS=120  (Fugu is multi-agent and slow; 60s is not enough)
 #   ALLOW_MOCK_LLM=false     (a true value is rejected at boot)
 #   EMAIL_BACKEND=smtp + SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / EMAIL_FROM
 #   RATE_LIMIT_PER_MINUTE / AUTH_RATE_LIMIT_PER_MINUTE / CHAT_RATE_LIMIT_PER_MINUTE

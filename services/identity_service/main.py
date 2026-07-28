@@ -61,12 +61,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "starting identity_service",
         extra={
             "environment": settings.environment,
-            "llm": "nvidia" if settings.llm_enabled else "mock",
+            "llm": "sakana" if settings.llm_enabled else "mock",
             "email_backend": settings.email_backend,
         },
     )
     if not settings.is_production and not settings.llm_enabled:
-        logger.warning("no NVIDIA_API_KEY configured; chat will use the mock provider")
+        logger.warning("no SAKANA_API_KEY configured; chat will use the mock provider")
 
     yield
 

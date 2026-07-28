@@ -14,12 +14,14 @@ codebase. What follows is the procedure that matches the repository.
 
 ---
 
-## 0. Before anything else: rotate the leaked key
+## 0. Before anything else: revoke the leaked key
 
 A live NVIDIA API key was committed to `.env.production` in this public
-repository. It is out of the working tree but still in git history.
+repository. NVIDIA is no longer the provider, but the key is still reachable in
+git history and still billable until revoked.
 
-1. Revoke it at <https://build.nvidia.com> and issue a replacement.
+1. Revoke it at <https://build.nvidia.com>. No replacement is needed; the
+   application no longer calls NVIDIA.
 2. Purge it from history:
 
 ```bash
@@ -74,6 +76,37 @@ Do not commit `jwt.pem`; `*.pem` is gitignored.
 
 ---
 
+## 2b. AI provider: Sakana AI
+
+1. Create a key at <https://console.sakana.ai>. It is displayed once.
+2. Attach an active subscription at <https://console.sakana.ai/billing>.
+   A key without one authenticates and `GET /v1/models` succeeds, but every
+   `POST /v1/chat/completions` returns `429 usage_limit_reached`. The client
+   reports that as a configuration fault rather than retrying, so it surfaces
+   as a clear error instead of a slow timeout.
+3. Set `SAKANA_API_KEY` as a Railway variable. Never in a file, never in the
+   image, never in the frontend bundle: the browser talks to this backend, and
+   the backend is the only thing that holds the key.
+
+Verify a key before deploying with it:
+
+```bash
+curl -s https://api.sakana.ai/v1/chat/completions \
+  -H "Authorization: Bearer $SAKANA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"fugu","messages":[{"role":"user","content":"ping"}]}'
+```
+
+Models: `fugu` (default routing pool), `fugu-ultra` (= `fugu-ultra-v1.1`),
+`fugu-ultra-v1.0`. Set `DEFAULT_LLM_MODEL` to choose. `LLM_REASONING_EFFORT`
+accepts `high`, `xhigh`, or `max` (`max` only on `fugu-ultra-v1.1`).
+
+Fugu orchestrates several frontier models per request, so keep
+`LLM_TIMEOUT_SECONDS` at 120 or above and make sure it stays below the
+platform's own request timeout, or the edge will cut the connection first.
+
+---
+
 ## 3. Backend on Railway
 
 Create a service from this repository. `railway.toml` supplies the rest:
@@ -95,7 +128,8 @@ DATABASE_URL=...
 MIGRATION_DATABASE_URL=...
 JWT_PRIVATE_KEY=...
 JWT_PUBLIC_KEY=...
-NVIDIA_API_KEY=...            # the rotated key
+SAKANA_API_KEY=...            # from console.sakana.ai, with a subscription
+LLM_TIMEOUT_SECONDS=120       # Fugu is multi-agent and slow
 ALLOW_MOCK_LLM=false
 ALLOWED_ORIGINS=https://<your-vercel-domain>
 FRONTEND_BASE_URL=https://<your-vercel-domain>
@@ -108,7 +142,7 @@ SMTP_PASSWORD=...
 `packages/shared_core/config.py` validates these at import time. With
 `ENVIRONMENT=production` the process exits rather than starting when it finds a
 SQLite URL, absent JWT keys, `ALLOW_MOCK_LLM=true`, a missing or placeholder
-NVIDIA key, empty/wildcard/`http://` CORS origins, a console or memory email
+Sakana key, empty/wildcard/`http://` CORS origins, a console or memory email
 backend, `smtp` without a host, a non-HTTPS `FRONTEND_BASE_URL`, or a half
 configured Auth0. A failed boot here is the guard working.
 

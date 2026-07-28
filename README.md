@@ -4,7 +4,7 @@ An AI social-media content platform: workspaces, brands, campaigns, and an
 LLM-backed chat assistant, behind self-hosted RS256 authentication.
 
 FastAPI + SQLAlchemy (async) on the backend, Next.js 14 App Router on the
-frontend, PostgreSQL for storage, NVIDIA NIM for completions.
+frontend, PostgreSQL for storage, Sakana AI (Fugu) for completions.
 
 ---
 
@@ -20,7 +20,7 @@ apps/
   web/                     Next.js 14 frontend (App Router, Tailwind)
 packages/
   shared_core/
-    ai/                    NVIDIA NIM client, retry/backoff, mock provider
+    ai/                    provider abstraction: base, sakana, mock, factory
     db/                    async engine, session, ORM models
     email/                 console / memory / SMTP senders
     middleware/            request context, security headers, rate limiting
@@ -48,6 +48,29 @@ Nine tables: `users`, `refresh_tokens`, `verification_tokens`, `workspaces`,
 
 Primary keys are 36-character string UUIDs so the same schema runs on both
 SQLite (local/CI) and PostgreSQL (deployed) with no branching.
+
+### AI provider
+
+The application depends only on `BaseAIProvider`. `routers/chat.py` calls
+`get_llm_client()` and never names a vendor, so replacing the provider is a
+change to `packages/shared_core/ai/` alone:
+
+```
+ai/base.py            the contract: complete(), stream(), message validation
+ai/types.py           ChatMessage / Completion, provider-neutral
+ai/errors.py          provider HTTP status -> application exception
+ai/retry.py           capped exponential backoff with jitter
+ai/sakana_client.py   Sakana AI (Fugu), OpenAI-compatible chat completions
+ai/mock_client.py     deterministic provider for dev, tests and CI
+ai/factory.py         the single place that chooses one
+```
+
+Sakana's Fugu is a multi-agent system that orchestrates several frontier models
+per request, so it is much slower than a single-model API; the default timeout
+is 120s. A key with no active subscription authenticates successfully but
+answers every completion with `429 usage_limit_reached`. That is a billing
+state rather than a burst limit, so it is raised immediately as a configuration
+error instead of being retried.
 
 ### Authentication
 
@@ -83,7 +106,7 @@ poetry run uvicorn services.identity_service.main:app --reload --port 8000
 - OpenAPI docs: <http://127.0.0.1:8000/docs> (disabled when `ENVIRONMENT=production`)
 - Liveness: `/healthz` · Readiness (checks the database): `/readyz`
 
-With no `NVIDIA_API_KEY` set and `ALLOW_MOCK_LLM=true`, chat responds from a mock
+With no `SAKANA_API_KEY` set and `ALLOW_MOCK_LLM=true`, chat responds from a mock
 provider whose output always contains the word "mock", so a misconfigured deploy
 is detectable rather than plausible.
 
@@ -153,7 +176,7 @@ Two details that cause most first-deploy failures:
    "prepared statement already exists".
 
 `ENVIRONMENT=production` refuses to boot on a SQLite URL, missing JWT keys, a
-mock-LLM flag, a missing NVIDIA key, wildcard or plaintext CORS origins, a
+mock-LLM flag, a missing Sakana key, wildcard or plaintext CORS origins, a
 console email backend, or a non-HTTPS frontend URL.
 
 ---
@@ -171,9 +194,9 @@ console email backend, or a non-HTTPS frontend URL.
 ## Security notice
 
 A live NVIDIA API key was committed to `.env.production` in this public
-repository's history. The file has been removed from the working tree, but
-**the key remains in git history**. It must be revoked at build.nvidia.com and
-purged:
+repository's history. NVIDIA is no longer used, but removing the file from the
+working tree did not remove the key: **it remains in git history** and must be
+revoked at build.nvidia.com and purged:
 
 ```bash
 git filter-repo --path .env.production --invert-paths

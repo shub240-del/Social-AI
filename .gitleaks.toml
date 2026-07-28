@@ -1,12 +1,22 @@
 # Extends the gitleaks default ruleset.
-# The default ruleset has no rule for NVIDIA NIM / build.nvidia.com keys, which is
-# the exact token format that leaked in .env.production. Added explicitly below.
+# The default ruleset has no rule for the provider token formats this project
+# uses, so they are declared explicitly below.
 [extend]
 useDefault = true
 
 [[rules]]
+id = "sakana-api-key"
+description = "Sakana AI (console.sakana.ai) API key"
+# Observed format: a "fish_" prefix followed by 64 hex characters.
+regex = '''fish_[A-Fa-f0-9]{48,}'''
+keywords = ["fish_"]
+
+# Retained after the migration away from NVIDIA: the key that leaked in
+# .env.production is still reachable in git history, so history scans must keep
+# matching it until that history is rewritten.
+[[rules]]
 id = "nvidia-api-key"
-description = "NVIDIA NIM / build.nvidia.com API key"
+description = "NVIDIA NIM / build.nvidia.com API key (legacy provider)"
 regex = '''nvapi-[A-Za-z0-9_\-]{60,}'''
 keywords = ["nvapi-"]
 

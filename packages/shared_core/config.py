@@ -24,7 +24,7 @@ PLACEHOLDERS = frozenset(
         "changeme",
         "change_me",
         "your_key_here",
-        "mock_nvidia_api_key",
+        "mock_sakana_api_key",
         "REQUIRED_FROM_VAULT",
         "",
     }
@@ -74,13 +74,21 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://127.0.0.1:3000,http://localhost:3000"
     frontend_base_url: str = "http://127.0.0.1:3000"
 
-    # ---- ai ------------------------------------------------------------
-    nvidia_api_key: str | None = None
-    nvidia_api_base_url: str = "https://integrate.api.nvidia.com/v1"
-    default_llm_model: str = "meta/llama-3.1-70b-instruct"
-    llm_timeout_seconds: float = 60.0
+    # ---- ai --------------------------------------------------------------
+    # Provider: Sakana AI (Fugu), an OpenAI-compatible chat-completions API.
+    sakana_api_key: str | None = None
+    sakana_api_base_url: str = "https://api.sakana.ai/v1"
+    default_llm_model: str = "fugu"
+    # Fugu is a multi-agent system that orchestrates several frontier models
+    # per request, so responses take far longer than a single-model provider.
+    # Sakana's own guidance is to raise client timeouts; 60s was not enough.
+    llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 3
     llm_max_output_tokens: int = 1024
+    # Fugu reasoning depth: "high", "xhigh", or "max" (fugu-ultra-v1.1 only).
+    # Unset leaves the provider default; an unrecognised value is ignored by
+    # the client rather than forwarded, because the API rejects it outright.
+    llm_reasoning_effort: str | None = None
     allow_mock_llm: bool = True
 
     # ---- email ---------------------------------------------------------
@@ -118,7 +126,7 @@ class Settings(BaseSettings):
     @property
     def llm_enabled(self) -> bool:
         """True when a real provider call can be made."""
-        return bool(self.nvidia_api_key) and self.nvidia_api_key not in PLACEHOLDERS
+        return bool(self.sakana_api_key) and self.sakana_api_key not in PLACEHOLDERS
 
     @property
     def docs_url(self) -> str | None:
@@ -170,11 +178,11 @@ class Settings(BaseSettings):
                 "that looks like a working AI product."
             )
 
-        if not self.nvidia_api_key:
-            problems.append("NVIDIA_API_KEY is not set, so no completion can be generated.")
-        elif self.nvidia_api_key in PLACEHOLDERS:
+        if not self.sakana_api_key:
+            problems.append("SAKANA_API_KEY is not set, so no completion can be generated.")
+        elif self.sakana_api_key in PLACEHOLDERS:
             problems.append(
-                f"NVIDIA_API_KEY is the placeholder {self.nvidia_api_key!r}; "
+                f"SAKANA_API_KEY is the placeholder {self.sakana_api_key!r}; "
                 "a .env.example was probably copied verbatim."
             )
 

@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
-from packages.shared_core.ai.nvidia_client import ChatMessage, get_llm_client
+from packages.shared_core.ai import ChatMessage, get_llm_client
 from packages.shared_core.db.models import Brand, Campaign, Conversation, Message
 from packages.shared_core.exceptions import NotFoundError, ValidationError
 from packages.shared_core.security.rbac import Permission, UserContext

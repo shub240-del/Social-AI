@@ -26,7 +26,7 @@ aiosqlite = "^0.22.1"            # sqlite fallback for local dev and tests
 bcrypt = "^5.0.0"
 pyjwt = {extras = ["crypto"], version = "^2.13.0"}
 cryptography = "^49.0.0"
-httpx = "^0.28.1"                # runtime: NVIDIA API client
+httpx = "^0.28.1"                # runtime: Sakana AI API client
 sentry-sdk = {extras = ["fastapi"], version = "^2.66.1", optional = true}
 
 [tool.poetry.extras]

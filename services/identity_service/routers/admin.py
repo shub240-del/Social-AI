@@ -37,7 +37,7 @@ async def config(user: SuperUser) -> dict[str, object]:
         "version": settings.release_version,
         "llm": {
             "configured": settings.llm_enabled,
-            "provider": "nvidia" if settings.llm_enabled else "mock",
+            "provider": "sakana" if settings.llm_enabled else "mock",
             "model": settings.default_llm_model,
             "mock_allowed": settings.allow_mock_llm,
         },

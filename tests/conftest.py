@@ -32,7 +32,7 @@ os.environ.update(
         "FRONTEND_BASE_URL": "http://127.0.0.1:3000",
     }
 )
-os.environ.pop("NVIDIA_API_KEY", None)
+os.environ.pop("SAKANA_API_KEY", None)
 
 import httpx  # noqa: E402
 from httpx import ASGITransport  # noqa: E402

@@ -26,7 +26,7 @@ _SCRUB_KEYS = {
     "token",
     "refresh_token",
     "access_token",
-    "nvidia_api_key",
+    "sakana_api_key",
     "jwt_private_key",
 }
 

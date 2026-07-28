@@ -67,7 +67,7 @@ async def readyz(response: Response) -> dict[str, object]:
     # Reported so a misconfigured production deploy is visible from outside.
     checks["llm"] = {
         "status": "ok" if settings.llm_enabled else "mock",
-        "provider": "nvidia" if settings.llm_enabled else "mock",
+        "provider": "sakana" if settings.llm_enabled else "mock",
     }
     checks["email"] = {"status": "ok", "backend": settings.email_backend}
 

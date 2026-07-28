@@ -43,7 +43,7 @@ export default function HomePage() {
 
       <section className="mx-auto max-w-4xl px-6 pb-16 pt-16 text-center sm:pt-24">
         <p className="mono mb-4 inline-block rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-300">
-          Powered by NVIDIA NIM · Llama 3.1 70B
+          Powered by Sakana AI · Fugu
         </p>
         <h1 className="text-4xl font-bold tracking-tight text-white sm:text-6xl">
           Social content that
