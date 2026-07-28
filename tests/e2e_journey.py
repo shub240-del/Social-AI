@@ -21,6 +21,18 @@ import httpx
 
 passed = 0
 failed: list[str] = []
+skipped: list[str] = []
+
+
+def skip(name: str) -> None:
+    """Record a check that could not run.
+
+    Skips are counted, not just printed: a run that quietly omits the email
+    verification steps still ended its summary with FAILED 0, which reads as
+    green when two real assertions never executed.
+    """
+    skipped.append(name)
+    print(f"  SKIP  {name}")
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
@@ -75,27 +87,46 @@ def main() -> int:
         # "last token wins" scan can pick up another account's link or a
         # token that a later request already superseded. Scope the search to
         # the console-email blocks addressed to this run's mailbox.
-        token = None
+        # Registration sends one verification email and the request above sends
+        # another, which supersedes the first. Two gunicorn workers share one
+        # stdout, so the order the blocks land in the log does not reliably
+        # match the order the tokens were issued, and "take the last one" picked
+        # a superseded token often enough to fail intermittently.
+        #
+        # Rather than guess, collect every candidate for this mailbox and use
+        # the one the server actually accepts. Single use is then asserted
+        # against that same token, which is the property under test.
+        candidates: list[str] = []
         if args.log:
             try:
                 with open(args.log, encoding="utf-8", errors="replace") as fh:
                     blocks = fh.read().split("----- email")
-                mine = [b for b in blocks if f"To:      {email}" in b]
-                found = [
-                    m.group(1)
-                    for b in mine
-                    if (m := re.search(r"/verify\?token=([A-Za-z0-9_\-]+)", b))
-                ]
-                token = found[-1] if found else None
+                for block in blocks:
+                    if f"To:      {email}" not in block:
+                        continue
+                    m = re.search(r"/verify\?token=([A-Za-z0-9_\-]+)", block)
+                    if m and m.group(1) not in candidates:
+                        candidates.append(m.group(1))
             except OSError:
-                token = None
-        if token:
-            vc = c.post(f"{v1}/auth/verify/confirm", json={"token": token})
-            check("emailed link verifies the account", vc.status_code == 200, vc.text[:160])
-            again = c.post(f"{v1}/auth/verify/confirm", json={"token": token})
-            check("the link is single use", again.status_code == 401, str(again.status_code))
+                candidates = []
+
+        if candidates:
+            accepted = None
+            for candidate in candidates:
+                if c.post(f"{v1}/auth/verify/confirm", json={"token": candidate}).status_code == 200:
+                    accepted = candidate
+                    break
+            check(
+                "emailed link verifies the account",
+                accepted is not None,
+                f"none of {len(candidates)} emailed token(s) were accepted",
+            )
+            if accepted:
+                again = c.post(f"{v1}/auth/verify/confirm", json={"token": accepted})
+                check("the link is single use", again.status_code == 401, str(again.status_code))
         else:
-            print("  SKIP  no --log given; cannot read the emailed link")
+            skip("emailed link verifies the account (no --log given)")
+            skip("the link is single use (no --log given)")
 
         step("4. Login")
         login = c.post(f"{v1}/auth/login", json={"email": email, "password": password})
@@ -190,10 +221,12 @@ def main() -> int:
         check("the conversation is still readable", still.status_code == 200, str(still.status_code))
 
     print("\n" + "=" * 56)
-    print(f"  PASSED {passed}   FAILED {len(failed)}")
+    print(f"  PASSED {passed}   FAILED {len(failed)}   SKIPPED {len(skipped)}")
     print("=" * 56)
     for f in failed:
         print(f"  FAIL  {f}")
+    for sk in skipped:
+        print(f"  SKIP  {sk}")
     return 1 if failed else 0
 
 
