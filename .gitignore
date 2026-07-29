@@ -1,34 +1,58 @@
-# Python
-__pycache__/
-
-# Artefacts left behind by `pip install .`, which the Dockerfile and CI both run.
-build/
-dist/
-*.egg-info/
-*.py[cod]
-.venv/
-venv/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-*.db
-
-# Node
+# Node / JavaScript / TypeScript
 node_modules/
 .next/
-out/
 *.tsbuildinfo
+# pnpm is the package manager for this workspace; an npm or yarn lockfile
+# alongside pnpm-lock.yaml resolves a different dependency tree.
+package-lock.json
+yarn.lock
+dist/
+build/
+.turbo/
+coverage/
+*.log
 
-# Secrets — deny by default, then allow the templates back in.
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local sqlite databases created by the dev server, the test suite and CI.
+*.db
+*.sqlite
+*.sqlite3
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+
+# Environment and Secrets
+# NOTE: this block was the cause of the .env.production credential leak.
+# The previous list enumerated .env.local / .env.*.local but NOT .env.production,
+# so .env.production was tracked by git. Deny-all-then-allow is the only safe shape.
 .env
 .env.*
 !.env.example
-!.env.local.example
+!.env.*.example
 *.pem
-!tests/fixtures/*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
 
-# OS / editor
-.DS_Store
-.idea/
+# IDEs & System
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# OS / Scratch
+scratch/
+tmp/

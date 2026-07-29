@@ -1,4 +1,4 @@
-"""Cross-cutting HTTP middleware: request IDs, access logs, rate limiting."""
+"""HTTP middleware: request identity, security headers, rate limiting."""
 
 from __future__ import annotations
 
@@ -6,133 +6,146 @@ import logging
 import time
 import uuid
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp
 
 from packages.shared_core.config import get_settings
+from packages.shared_core.exceptions import RateLimitError
 
-logger = logging.getLogger("socialai.access")
+logger = logging.getLogger(__name__)
+
+RequestHandler = Callable[[Request], Awaitable[Response]]
+
+# Static policy. connect-src stays 'self' because the browser talks to the API
+# through the same origin in production (Vercel rewrite) or an explicit origin.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Attach a request id, expose it as a header, and log the outcome."""
+    """Attach a request id and log one line per request with its duration."""
 
-    async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = request_id
         started = time.perf_counter()
-        try:
-            response = await call_next(request)
-        except Exception:
-            duration = (time.perf_counter() - started) * 1000
-            logger.exception(
-                "request failed",
-                extra={
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "duration_ms": round(duration, 2),
-                },
-            )
-            raise
-        duration = (time.perf_counter() - started) * 1000
+
+        response = await call_next(request)
+
+        duration_ms = (time.perf_counter() - started) * 1000
         response.headers["X-Request-ID"] = request_id
-        response.headers["X-Response-Time-ms"] = f"{duration:.2f}"
+        response.headers["X-Response-Time"] = f"{duration_ms:.1f}ms"
         logger.info(
-            "%s %s -> %s (%.2fms)",
+            "%s %s -> %s in %.1fms",
             request.method,
             request.url.path,
             response.status_code,
-            duration,
-            extra={"request_id": request_id},
+            duration_ms,
+            extra={"request_id": request_id, "status_code": response.status_code},
         )
         return response
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response: Response = await call_next(request)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-        response.headers.setdefault(
-            "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
-        )
-        # The API returns JSON only; a restrictive CSP costs nothing and blocks
-        # rendering of any content that is reflected back to a browser.
-        response.headers.setdefault(
-            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
-        )
-        # Announcing the exact server makes CVE matching trivial for scanners.
+    """Defence-in-depth headers.
+
+    The platform edge may set some of these too; setting them here means they
+    are correct even when the app is reached directly.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
+        response = await call_next(request)
+        settings = get_settings()
+
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-site"
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        # Naming the stack and version tells an attacker which CVEs to try.
         response.headers["Server"] = "socialai"
-        if get_settings().is_production:
-            response.headers.setdefault(
-                "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+
+        if settings.is_production:
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=63072000; includeSubDomains; preload"
             )
+        # Auth responses carry tokens; keep them out of shared caches.
+        if request.url.path.startswith(f"{settings.api_v1_prefix}/auth"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Fixed-window-per-key limiter.
+    """Fixed-window limiter keyed on client IP and traffic class.
 
-    In-process only: each replica keeps its own counters, so the effective
-    global limit is (limit x replicas). Adequate as an abuse floor for launch;
-    move the counters to Redis before scaling out horizontally.
+    In-process only: the effective limit is ``limit x replicas``. That is
+    acceptable at one or two workers and must move to Redis before scaling
+    out — it is a speed bump against brute force, not a quota system.
+
+    Three buckets, counted independently:
+
+    ``auth``     credential endpoints, the brute-force surface
+    ``chat``     LLM calls, which cost real money per request
+    ``default``  everything else
     """
 
-    def __init__(self, app) -> None:
+    #: Credential endpoints. Matched as path segments so that "/auth/me",
+    #: which the web app calls on every page load, is NOT swept into the
+    #: credential bucket and cannot be starved by a burst of logins.
+    AUTH_PATHS = (
+        "/auth/login",
+        "/auth/register",
+        "/auth/refresh",
+        "/auth/password",
+        "/auth/verify",
+    )
+
+    EXEMPT_PATHS = frozenset({"/healthz", "/readyz", "/livez"})
+
+    def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
-    # Only endpoints that accept credentials get the strict bucket. /auth/me and
-    # /auth/logout are ordinary authenticated calls - /auth/me in particular is
-    # hit on every dashboard load, so throttling it at the credential rate
-    # locks out normal users.
-    CREDENTIAL_PATHS = (
-        "/api/v1/auth/login",
-        "/api/v1/auth/register",
-        "/api/v1/auth/refresh",
-        # Unauthenticated and email-sending: without the strict bucket these
-        # are a free spam relay and a user-enumeration oracle.
-        "/api/v1/auth/verify/request",
-        "/api/v1/auth/verify/confirm",
-        "/api/v1/auth/password/forgot",
-        "/api/v1/auth/password/reset",
-        "/api/v1/auth/password/change",
-    )
-
-    def _bucket_for(self, path: str) -> tuple[str, int]:
-        """Return (bucket name, limit).
-
-        The bucket must be identified by name rather than by its limit value:
-        keying on the number alone silently merges two buckets whenever their
-        configured limits happen to be equal, which would let chat traffic
-        consume the default allowance and vice versa.
-        """
-        s = get_settings()
-        if path in self.CREDENTIAL_PATHS:
-            return "auth", s.rate_limit_auth_per_minute
-        if path.endswith("/chat") or path.endswith("/chat/stream"):
-            return "chat", s.rate_limit_chat_per_minute
-        return "default", s.rate_limit_default_per_minute
-
     @staticmethod
     def _client_key(request: Request) -> str:
-        # X-Forwarded-For is set by Railway/Vercel edge; fall back to peer.
-        fwd = request.headers.get("X-Forwarded-For")
-        ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
-        auth = request.headers.get("Authorization", "")
-        # Bucket authenticated callers by token so a shared NAT egress IP does
-        # not cause one tenant to rate-limit another.
-        suffix = auth[-24:] if auth else "anon"
-        return f"{ip}:{suffix}"
+        # Trust the left-most XFF entry only behind a proxy that sets it.
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
 
-    async def dispatch(self, request: Request, call_next):
+    def _bucket_for(self, path: str) -> tuple[str, int]:
+        """Return the bucket name and its per-minute allowance.
+
+        The name is what keys the counter. Keying on the allowance instead
+        would silently merge two buckets whenever their limits happened to be
+        configured to the same number.
+        """
         settings = get_settings()
+        if any(part in path for part in self.AUTH_PATHS):
+            return "auth", settings.auth_rate_limit_per_minute
+        # Chat is the only endpoint that spends money per call, so it gets its
+        # own budget rather than sharing the generous default one.
+        if "/chat" in path:
+            return "chat", settings.chat_rate_limit_per_minute
+        return "default", settings.rate_limit_per_minute
+
+    async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
+        settings = get_settings()
+        if not settings.rate_limit_enabled or request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.url.path
-        if not settings.rate_limit_enabled or path in ("/healthz", "/readyz"):
+        # Probes run far more often than any user. Throttling them would take
+        # the service out of its load balancer during a traffic spike.
+        if path in self.EXEMPT_PATHS:
             return await call_next(request)
 
         bucket, limit = self._bucket_for(path)
@@ -144,14 +157,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         if len(window) >= limit:
             retry_after = max(1, int(60.0 - (now - window[0])))
+            logger.warning("rate limit hit on the %s bucket for %s (%s)", bucket, key, path)
+            # Built from the exception rather than hand-written, so the code
+            # and message cannot drift from the one every other 429 uses.
+            # Middleware returns instead of raising: BaseHTTPMiddleware sits
+            # outside the app's exception handlers, so a raise here would
+            # escape as a bare 500.
+            error = RateLimitError()
             return JSONResponse(
-                status_code=429,
-                content={
-                    "error": {
-                        "code": "rate_limited",
-                        "message": "Too many requests. Please slow down.",
-                    }
-                },
+                status_code=error.status_code,
+                content=error.to_dict(),
                 headers={"Retry-After": str(retry_after)},
             )
 
@@ -160,3 +175,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         response.headers["X-RateLimit-Limit"] = str(limit)
         response.headers["X-RateLimit-Remaining"] = str(max(0, limit - len(window)))
         return response
+
+
+__all__ = [
+    "RateLimitMiddleware",
+    "RequestContextMiddleware",
+    "SecurityHeadersMiddleware",
+]

@@ -112,12 +112,6 @@ def get_keys(settings: Settings | None = None) -> tuple[str, str]:
     return _keys
 
 
-def reset_keys_for_tests() -> None:
-    global _keys
-    _keys = None
-    _dev_key_path().unlink(missing_ok=True)
-
-
 def create_access_token(
     *, user_id: str, email: str, extra: dict[str, Any] | None = None
 ) -> str:

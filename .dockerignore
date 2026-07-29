@@ -1,13 +1,37 @@
-apps/
-**/node_modules
-**/.next
-**/__pycache__
-**/*.pyc
-.pytest_cache/
-.venv/
-*.db
-.git/
-.env
-.env.*
+# Node / Next.js
+node_modules
+.next
+.turbo
+dist
+build
+coverage
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+.venv
+venv
+.mypy_cache
+.ruff_cache
+
+# Version control & Local config
+.git
+.gitignore
+.github
+.env*
 !.env.example
-outputs/
+docker-compose.yml
+# README.md is NOT excluded: pyproject.toml declares `readme = "README.md"` and
+# the Dockerfile copies it into the dependency layer, so excluding it here
+# breaks `COPY pyproject.toml poetry.lock* README.md ./` with a missing file.
+
+# OS & Temp
+.DS_Store
+Thumbs.db
+tmp
+scratch

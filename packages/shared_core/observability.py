@@ -11,6 +11,7 @@ that nobody is watching.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from packages.shared_core.config import get_settings
 
@@ -26,15 +27,15 @@ _SCRUB_KEYS = {
     "token",
     "refresh_token",
     "access_token",
-    "nvidia_api_key",
+    "sakana_api_key",
     "jwt_private_key",
 }
 
 
-def _scrub(event: dict, _hint: dict) -> dict:
+def _scrub(event: Any, _hint: dict[str, Any]) -> Any:
     """Best-effort redaction before anything leaves the process."""
 
-    def walk(node):
+    def walk(node: Any) -> Any:
         if isinstance(node, dict):
             return {
                 k: ("[redacted]" if k.lower() in _SCRUB_KEYS else walk(v))

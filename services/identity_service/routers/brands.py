@@ -1,103 +1,106 @@
-"""Brand CRUD. Every query is scoped to the caller's workspace."""
+"""Brands: the voice the AI writes in.
+
+Nested under a workspace so tenancy is enforced by the path itself. A brand id
+is never resolved without also matching the workspace from the URL, which is
+what stops a valid id from one tenant being read by another.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, status
-from sqlalchemy import func, select
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared_core.db.models import Brand
 from packages.shared_core.exceptions import NotFoundError
-from packages.shared_core.security.rbac import assert_member, assert_permission
-from packages.shared_core.security.roles import Permission
-from services.identity_service.auth.dependencies import CurrentUser, SessionDep
+from packages.shared_core.security.rbac import Permission, UserContext
+from services.identity_service.auth.dependencies import (
+    SessionDep,
+    requires,
+)
+from services.identity_service.routing import CommitRoute
 from services.identity_service.schemas import (
     BrandCreate,
-    BrandOut,
+    BrandResponse,
     BrandUpdate,
-    Page,
-    PagedBrands,
+    MessageResponse,
 )
 
-router = APIRouter(prefix="/workspaces/{workspace_id}/brands", tags=["brands"])
+router = APIRouter(prefix="/workspaces/{workspace_id}/brands", tags=["brands"], route_class=CommitRoute)
 
 
-async def _get_scoped(session, ctx, workspace_id: str, brand_id: str) -> Brand:
-    assert_member(ctx, workspace_id)
-    # workspace_id is part of the predicate, so a valid brand id from another
-    # tenant cannot be reached by guessing.
+async def _get_owned(session: AsyncSession, workspace_id: str, brand_id: str) -> Brand:
     result = await session.execute(
         select(Brand).where(Brand.id == brand_id, Brand.workspace_id == workspace_id)
     )
-    brand = result.scalar_one_or_none()
+    brand: Brand | None = result.scalar_one_or_none()
     if brand is None:
-        raise NotFoundError("Brand not found.")
+        raise NotFoundError("That brand does not exist.")
     return brand
 
 
-@router.get("", response_model=PagedBrands)
+@router.get("", response_model=list[BrandResponse])
 async def list_brands(
     workspace_id: str,
-    ctx: CurrentUser,
     session: SessionDep,
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-) -> PagedBrands:
-    assert_permission(ctx, workspace_id, Permission.BRAND_READ)
-    total = await session.scalar(
-        select(func.count(Brand.id)).where(Brand.workspace_id == workspace_id)
+    context: Annotated[UserContext, Depends(requires(Permission.BRAND_READ))],
+) -> list[BrandResponse]:
+    result = await session.execute(
+        select(Brand).where(Brand.workspace_id == workspace_id).order_by(Brand.created_at)
     )
-    rows = await session.execute(
-        select(Brand)
-        .where(Brand.workspace_id == workspace_id)
-        .order_by(Brand.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
-    return PagedBrands(
-        items=[BrandOut.model_validate(b) for b in rows.scalars()],
-        page=Page(total=total or 0, limit=limit, offset=offset),
-    )
+    return [BrandResponse.model_validate(b) for b in result.scalars()]
 
 
-@router.post("", response_model=BrandOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=BrandResponse, status_code=status.HTTP_201_CREATED)
 async def create_brand(
-    workspace_id: str, payload: BrandCreate, ctx: CurrentUser, session: SessionDep
-) -> BrandOut:
-    assert_permission(ctx, workspace_id, Permission.BRAND_WRITE)
+    workspace_id: str,
+    payload: BrandCreate,
+    session: SessionDep,
+    context: Annotated[UserContext, Depends(requires(Permission.BRAND_WRITE))],
+) -> BrandResponse:
     brand = Brand(workspace_id=workspace_id, **payload.model_dump())
     session.add(brand)
     await session.flush()
-    return BrandOut.model_validate(brand)
+    return BrandResponse.model_validate(brand)
 
 
-@router.get("/{brand_id}", response_model=BrandOut)
+@router.get("/{brand_id}", response_model=BrandResponse)
 async def get_brand(
-    workspace_id: str, brand_id: str, ctx: CurrentUser, session: SessionDep
-) -> BrandOut:
-    assert_permission(ctx, workspace_id, Permission.BRAND_READ)
-    return BrandOut.model_validate(await _get_scoped(session, ctx, workspace_id, brand_id))
+    workspace_id: str,
+    brand_id: str,
+    session: SessionDep,
+    context: Annotated[UserContext, Depends(requires(Permission.BRAND_READ))],
+) -> BrandResponse:
+    return BrandResponse.model_validate(await _get_owned(session, workspace_id, brand_id))
 
 
-@router.patch("/{brand_id}", response_model=BrandOut)
+@router.patch("/{brand_id}", response_model=BrandResponse)
 async def update_brand(
     workspace_id: str,
     brand_id: str,
     payload: BrandUpdate,
-    ctx: CurrentUser,
     session: SessionDep,
-) -> BrandOut:
-    assert_permission(ctx, workspace_id, Permission.BRAND_WRITE)
-    brand = await _get_scoped(session, ctx, workspace_id, brand_id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    context: Annotated[UserContext, Depends(requires(Permission.BRAND_WRITE))],
+) -> BrandResponse:
+    brand = await _get_owned(session, workspace_id, brand_id)
+    for key, value in payload.model_dump(exclude_unset=True).items():
         if value is not None:
-            setattr(brand, field, value)
+            setattr(brand, key, value)
     await session.flush()
-    return BrandOut.model_validate(brand)
+    return BrandResponse.model_validate(brand)
 
 
-@router.delete("/{brand_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+@router.delete("/{brand_id}", response_model=MessageResponse)
 async def delete_brand(
-    workspace_id: str, brand_id: str, ctx: CurrentUser, session: SessionDep
-) -> None:
-    assert_permission(ctx, workspace_id, Permission.BRAND_WRITE)
-    await session.delete(await _get_scoped(session, ctx, workspace_id, brand_id))
+    workspace_id: str,
+    brand_id: str,
+    session: SessionDep,
+    context: Annotated[UserContext, Depends(requires(Permission.BRAND_DELETE))],
+) -> MessageResponse:
+    await session.delete(await _get_owned(session, workspace_id, brand_id))
+    return MessageResponse(message="Brand deleted.")
+
+
+__all__ = ["router"]

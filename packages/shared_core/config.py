@@ -1,28 +1,34 @@
-"""Central application settings.
+"""Application settings with production fail-fast guards.
 
-Fail-fast by design: production boots are rejected when a required secret is
-missing or still holds a placeholder value. The original repository shipped
-``REQUIRED_FROM_VAULT`` placeholders with no mechanism to replace them, which
-meant the app could start with literal placeholder strings as credentials.
+Configuration that is merely inconvenient in development is fatal in
+production: a SQLite file that vanishes on redeploy, a wildcard CORS policy,
+an email backend that prints to stdout, a mock LLM. Each of those looks like a
+working system right up until it costs real data or real users.
+
+``_validate_production`` therefore collects *every* problem and raises once, so
+a deploy reveals the whole list instead of failing one variable at a time.
 """
 
 from __future__ import annotations
 
-import logging
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-logger = logging.getLogger(__name__)
-
-PLACEHOLDERS = {
-    "",
-    "REQUIRED_FROM_VAULT",
-    "changeme",
-    "your_key_here",
-}
+# Values that appear in .env.example. A copied example file is the single most
+# likely way a placeholder reaches production.
+PLACEHOLDERS = frozenset(
+    {
+        "changeme",
+        "change_me",
+        "your_key_here",
+        "mock_sakana_api_key",
+        "REQUIRED_FROM_VAULT",
+        "",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -33,142 +39,201 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # ---- environment -------------------------------------------------
-    environment: Literal["development", "test", "production"] = "development"
+    # ---- core ----------------------------------------------------------
+    environment: Literal["development", "test", "staging", "production"] = "development"
     log_level: str = "INFO"
-    service_name: str = "socialai-api"
+    release_version: str = "1.0.0"
+    api_v1_prefix: str = "/api/v1"
 
-    # ---- server ------------------------------------------------------
-    host: str = "0.0.0.0"
-    port: int = 8000
-    # Comma-separated in the environment, parsed to a list below.
-    allowed_origins: str = "http://localhost:3000"
-
-    # ---- database ----------------------------------------------------
-    # SQLite keeps local development and CI dependency-free. Supabase/Postgres
-    # is selected purely by changing this URL; no code path differs.
-    database_url: str = "sqlite+aiosqlite:///./socialai.db"
+    # ---- database ------------------------------------------------------
+    database_url: str = "sqlite+aiosqlite:///./socialai_dev.db"
+    # DDL must bypass a transaction pooler; Supabase :6543 cannot run it.
     migration_database_url: str | None = None
     postgres_pool_size: int = 5
     postgres_max_overflow: int = 5
     db_echo: bool = False
 
-    # ---- auth --------------------------------------------------------
-    # Local RS256 issuance. Keys are generated on first boot in development;
-    # in production they must be supplied via the environment.
-    jwt_algorithm: str = "RS256"
+    # ---- auth ----------------------------------------------------------
     jwt_private_key: str | None = None
     jwt_public_key: str | None = None
     jwt_issuer: str = "https://api.socialai.io"
     jwt_audience: str = "https://api.socialai.io"
     access_token_ttl_seconds: int = 900          # 15 minutes
-    refresh_token_ttl_seconds: int = 60 * 60 * 24 * 14   # 14 days
+    refresh_token_ttl_seconds: int = 60 * 60 * 24 * 30
+    require_email_verification: bool = False
+    email_verify_ttl_seconds: int = 60 * 60 * 24
+    password_reset_ttl_seconds: int = 60 * 60
 
-    # Optional Auth0 federation. When auth0_domain is set, tokens issued by
-    # Auth0 are accepted alongside locally issued ones.
+    # Legacy Auth0 support. Kept because the original deployment used it; a
+    # half-configured tenant is worse than none, so both must be present.
     auth0_domain: str | None = None
-    auth0_audience: str | None = None
     auth0_issuer: str | None = None
+    auth0_audience: str | None = None
 
-    # ---- AI ----------------------------------------------------------
-    nvidia_api_key: str | None = None
-    nvidia_api_base_url: str = "https://integrate.api.nvidia.com/v1"
-    default_llm_model: str = "meta/llama-3.1-70b-instruct"
-    llm_timeout_seconds: float = 60.0
-    llm_max_retries: int = 2
+    # ---- transport -----------------------------------------------------
+    allowed_origins: str = "http://127.0.0.1:3000,http://localhost:3000"
+    frontend_base_url: str = "http://127.0.0.1:3000"
+
+    # ---- ai --------------------------------------------------------------
+    # Provider: Sakana AI (Fugu), an OpenAI-compatible chat-completions API.
+    sakana_api_key: str | None = None
+    sakana_api_base_url: str = "https://api.sakana.ai/v1"
+    default_llm_model: str = "fugu"
+    # Fugu is a multi-agent system that orchestrates several frontier models
+    # per request, so responses take far longer than a single-model provider.
+    # Sakana's own guidance is to raise client timeouts; 60s was not enough.
+    llm_timeout_seconds: float = 120.0
+    llm_max_retries: int = 3
     llm_max_output_tokens: int = 1024
-    # When no API key is configured the deterministic echo provider is used so
-    # the full product flow remains exercisable without credentials.
+    # Fugu reasoning depth: "high", "xhigh", or "max" (fugu-ultra-v1.1 only).
+    # Unset leaves the provider default; an unrecognised value is ignored by
+    # the client rather than forwarded, because the API rejects it outright.
+    llm_reasoning_effort: str | None = None
     allow_mock_llm: bool = True
 
-    # ---- observability ------------------------------------------------
-    sentry_dsn: str | None = None
-    sentry_traces_sample_rate: float = 0.1
-    release_version: str = "unknown"
-
-    # ---- email / account verification --------------------------------
-    email_backend: Literal["console", "smtp"] = "console"
+    # ---- email ---------------------------------------------------------
+    email_backend: Literal["console", "smtp", "memory"] = "console"
     email_from: str = "Social AI <no-reply@socialai.io>"
-    smtp_host: str = ""
+    smtp_host: str | None = None
     smtp_port: int = 587
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_use_tls: bool = True
-    # Public URL of the web app, used to build the links inside emails.
-    frontend_base_url: str = "http://localhost:3000"
-    require_email_verification: bool = False
-    email_verify_ttl_seconds: int = 60 * 60 * 24      # 24 hours
-    password_reset_ttl_seconds: int = 60 * 60         # 1 hour
 
-    # ---- limits ------------------------------------------------------
+    # ---- limits & observability ----------------------------------------
     rate_limit_enabled: bool = True
-    rate_limit_auth_per_minute: int = 10
-    rate_limit_chat_per_minute: int = 20
-    rate_limit_default_per_minute: int = 120
-    max_chat_prompt_chars: int = 8000
+    rate_limit_per_minute: int = 120
+    auth_rate_limit_per_minute: int = 10
+    # Chat is the only route that spends money with a third party on every
+    # call, so it is budgeted separately from ordinary reads.
+    chat_rate_limit_per_minute: int = 20
+    sentry_dsn: str | None = None
+    sentry_traces_sample_rate: float = 0.1
 
-    @field_validator("log_level")
-    @classmethod
-    def _upper(cls, v: str) -> str:
-        return v.upper()
+    # ---- derived --------------------------------------------------------
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def is_test(self) -> bool:
+        return self.environment == "test"
 
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
     @property
-    def is_production(self) -> bool:
-        return self.environment == "production"
-
-    @property
-    def effective_migration_url(self) -> str:
-        return self.migration_database_url or self.database_url
-
-    @property
     def llm_enabled(self) -> bool:
-        return bool(self.nvidia_api_key and self.nvidia_api_key not in PLACEHOLDERS)
+        """True when a real provider call can be made."""
+        return bool(self.sakana_api_key) and self.sakana_api_key not in PLACEHOLDERS
 
-    @model_validator(mode="after")
-    def _production_guards(self) -> Settings:
-        if not self.is_production:
-            return self
+    @property
+    def docs_url(self) -> str | None:
+        return None if self.is_production else "/docs"
 
+    @property
+    def openapi_url(self) -> str | None:
+        # A public schema in production hands an attacker the full attack
+        # surface, including every field name and validation rule.
+        return None if self.is_production else f"{self.api_v1_prefix}/openapi.json"
+
+    @property
+    def sync_database_url(self) -> str:
+        """Alembic drives DDL synchronously."""
+        url = self.migration_database_url or self.database_url
+        return url.replace("+asyncpg", "+psycopg2").replace("+aiosqlite", "")
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _strip_origins(cls, v: str) -> str:
+        return v.strip()
+
+    def model_post_init(self, __context: object) -> None:
+        if self.is_production:
+            self._validate_production()
+
+    # ---- the guard ------------------------------------------------------
+    def _validate_production(self) -> None:
         problems: list[str] = []
 
         if self.database_url.startswith("sqlite"):
-            problems.append("DATABASE_URL must not be SQLite in production")
-        for name in ("jwt_private_key", "jwt_public_key"):
-            if (getattr(self, name) or "") in PLACEHOLDERS:
-                problems.append(f"{name.upper()} is required in production")
-        # The mock provider returns deterministic canned text. Shipping that to
-        # real users looks like a working product while producing nothing of
-        # value, so production must use a real provider.
+            problems.append(
+                "DATABASE_URL points at SQLite. Production data must live in "
+                "Postgres; a container-local file is lost on every redeploy."
+            )
+
+        if not self.jwt_private_key:
+            problems.append(
+                "JWT_PRIVATE_KEY is not set. The development fallback writes a "
+                "keypair to the temp directory, so anyone who can read it could "
+                "mint valid tokens."
+            )
+        if not self.jwt_public_key:
+            problems.append("JWT_PUBLIC_KEY is not set; tokens could not be verified.")
+
         if self.allow_mock_llm:
-            problems.append("ALLOW_MOCK_LLM must be false in production")
-        if not self.llm_enabled:
-            problems.append("NVIDIA_API_KEY is required in production")
-        if any(o == "*" for o in self.cors_origins):
-            problems.append("ALLOWED_ORIGINS must not contain '*' in production")
-        if self.auth0_domain and not self.auth0_issuer:
-            problems.append("AUTH0_ISSUER is required whenever AUTH0_DOMAIN is set")
-        # A console backend in production means verification and password-reset
-        # emails are written to the log and never delivered. Users would be
-        # unable to reset a password and would never receive a verify link,
-        # with no error anywhere to indicate it.
+            problems.append(
+                "ALLOW_MOCK_LLM is enabled. Production would serve canned text "
+                "that looks like a working AI product."
+            )
+
+        if not self.sakana_api_key:
+            problems.append("SAKANA_API_KEY is not set, so no completion can be generated.")
+        elif self.sakana_api_key in PLACEHOLDERS:
+            problems.append(
+                f"SAKANA_API_KEY is the placeholder {self.sakana_api_key!r}; "
+                "a .env.example was probably copied verbatim."
+            )
+
+        origins = self.cors_origins
+        if not origins:
+            problems.append("ALLOWED_ORIGINS is empty; the frontend could not call the API.")
+        if "*" in origins:
+            problems.append(
+                "ALLOWED_ORIGINS contains '*'. With credentialed requests this "
+                "lets any site act on behalf of a logged-in user."
+            )
+        for origin in origins:
+            if origin.startswith("http://"):
+                problems.append(f"ALLOWED_ORIGINS contains a plaintext origin: {origin}")
+
         if self.email_backend == "console":
-            problems.append("EMAIL_BACKEND must be 'smtp' in production")
-        elif not self.smtp_host:
-            problems.append("SMTP_HOST is required when EMAIL_BACKEND is 'smtp'")
-        if self.frontend_base_url.startswith("http://"):
-            problems.append("FRONTEND_BASE_URL must be https in production")
+            problems.append(
+                "EMAIL_BACKEND is 'console'. Verification and reset mail would be "
+                "printed to the log and never delivered."
+            )
+        if self.email_backend == "smtp" and not self.smtp_host:
+            problems.append("EMAIL_BACKEND is 'smtp' but SMTP_HOST is not set.")
+
+        if not self.frontend_base_url.startswith("https://"):
+            problems.append(
+                "FRONTEND_BASE_URL must be https; verification links are sent by "
+                f"email and must not travel over plaintext (got {self.frontend_base_url!r})."
+            )
+
+        # Partial Auth0 config silently disables validation of the very tokens
+        # it is meant to check.
+        if self.auth0_domain and not self.auth0_issuer:
+            problems.append("AUTH0_DOMAIN is set but AUTH0_ISSUER is missing.")
+        if self.auth0_issuer and not self.auth0_domain:
+            problems.append("AUTH0_ISSUER is set but AUTH0_DOMAIN is missing.")
 
         if problems:
             raise ValueError(
-                "Invalid production configuration:\n  - " + "\n  - ".join(problems)
+                "Refusing to start in production; fix all of the following:\n"
+                + "\n".join(f"  - {p}" for p in problems)
             )
-        return self
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """Cached so a request never pays for environment parsing.
+
+    Tests call ``get_settings.cache_clear()`` after monkeypatching the
+    environment.
+    """
     return Settings()
+
+
+__all__ = ["Settings", "get_settings", "PLACEHOLDERS", "Field"]

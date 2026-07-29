@@ -1,12 +1,52 @@
+# Backend deployment — Railway
+# Replaces render.yaml as the backend target.
+
 [build]
-builder = "dockerfile"
+builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Migrations run as a release step so a bad migration fails the deploy
-# instead of leaving half the replicas on the new code.
-startCommand = "alembic upgrade head && gunicorn services.identity_service.main:app --worker-class services.identity_service.worker.SocialAIWorker --workers ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:${PORT} --timeout 120 --graceful-timeout 30 --access-logfile - --error-logfile -"
-healthcheckPath = "/readyz"
-healthcheckTimeout = 60
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
+# Migrations run ONCE per deploy, before the new version receives traffic.
+# Previously `alembic upgrade head` was chained into render.yaml's startCommand,
+# which re-ran on every container start and would race across replicas.
+# Uses the direct :5432 Supabase endpoint — DDL must not go through the
+# transaction pooler.
+preDeployCommand = "python -m alembic upgrade head"
+
+startCommand = "gunicorn services.identity_service.main:app -k services.identity_service.worker.SecureUvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:${PORT} --timeout 120 --graceful-timeout 30 --access-logfile -"
+
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+
+numReplicas = 1
+
+# -----------------------------------------------------------------------------
+# Variables to set in the Railway service UI (never in the repo).
+# Mirrors .env.production.example:
+#
+#   ENVIRONMENT=production
+#   LOG_LEVEL=INFO
+#   ALLOWED_ORIGINS=https://<vercel-domain>,https://app.socialai.io
+#   FRONTEND_BASE_URL=https://<vercel-domain>   (used to build email links)
+#   JWT_PRIVATE_KEY / JWT_PUBLIC_KEY            (RS256 PEM keypair, required)
+#   JWT_ISSUER / JWT_AUDIENCE
+#   DATABASE_URL             (Supabase :6543 transaction pooler, +asyncpg)
+#   MIGRATION_DATABASE_URL   (Supabase :5432 direct, +psycopg2, preDeploy only)
+#   SAKANA_API_KEY           (from console.sakana.ai; needs an active subscription)
+#   SAKANA_API_BASE_URL / DEFAULT_LLM_MODEL   (defaults: api.sakana.ai/v1, fugu)
+#   LLM_TIMEOUT_SECONDS=120  (Fugu is multi-agent and slow; 60s is not enough)
+#   ALLOW_MOCK_LLM=false     (a true value is rejected at boot)
+#   EMAIL_BACKEND=smtp + SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / EMAIL_FROM
+#   RATE_LIMIT_PER_MINUTE / AUTH_RATE_LIMIT_PER_MINUTE / CHAT_RATE_LIMIT_PER_MINUTE
+#   WEB_CONCURRENCY=4
+#
+# Auth0 is optional and off by default; authentication is self hosted. Set
+# AUTH0_DOMAIN, AUTH0_ISSUER and AUTH0_AUDIENCE together or not at all.
+#
+# WEB_CONCURRENCY note: 4 workers x POSTGRES_POOL_SIZE 5 x MAX_OVERFLOW 5 means
+# up to 40 connections per replica against the Supabase pooler. Verify against
+# your plan's connection limit before raising either number.
+# -----------------------------------------------------------------------------

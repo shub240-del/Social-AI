@@ -3,106 +3,86 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
-import { AppShell } from '@/components/AppShell';
-import { BrandPanel } from '@/components/BrandPanel';
+import { ArrowLeft, Loader2, MessageSquarePlus, Send, Sparkles, Trash2 } from 'lucide-react';
 import { CampaignPanel } from '@/components/CampaignPanel';
-import { Empty, ErrorBanner, Spinner } from '@/components/Field';
+import { EmptyState, ErrorBanner, Spinner } from '@/components/Field';
 import {
   api,
   ApiError,
   type Brand,
   type Campaign,
+  type ChatMessage,
   type Conversation,
-  type Message,
 } from '@/lib/api';
-import { useRequireAuth } from '@/lib/auth';
-
-type Tab = 'chats' | 'brands' | 'campaigns';
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'chats', label: 'Chats' },
-  { id: 'brands', label: 'Brands' },
-  { id: 'campaigns', label: 'Campaigns' },
-];
+import { useAuth } from '@/lib/useAuth';
 
 export default function WorkspacePage() {
-  const { loading: authLoading, user } = useRequireAuth();
   const params = useParams<{ id: string }>();
   const workspaceId = params.id;
+  const { user, loading } = useAuth();
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [brands, setBrands] = useState<Brand[]>([]);
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [tab, setTab] = useState<Tab>('chats');
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [brandId, setBrandId] = useState('');
-  const [campaignId, setCampaignId] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [brandId, setBrandId] = useState<string>('');
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [campaignId, setCampaignId] = useState<string>('');
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
-  const [loadingData, setLoadingData] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const loadSidebar = useCallback(async () => {
-    const [convs, brandPage, campaignPage] = await Promise.all([
-      api.listConversations(workspaceId),
-      api.listBrands(workspaceId),
-      api.listCampaigns(workspaceId),
-    ]);
-    setConversations(convs.items);
-    setBrands(brandPage.items);
-    setCampaigns(campaignPage.items);
-    return convs.items;
-  }, [workspaceId]);
-
-  // Initial load. Restores the most recent conversation so a reload lands
-  // the user exactly where they left off.
-  useEffect(() => {
-    if (authLoading || !user) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const items = await loadSidebar();
-        if (cancelled) return;
-        if (items.length) {
-          const detail = await api.getConversation(workspaceId, items[0].id);
-          if (cancelled) return;
-          setActiveId(detail.id);
-          setMessages(detail.messages);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(
-            err instanceof ApiError && err.status === 404
-              ? 'This workspace does not exist or you do not have access to it.'
-              : 'Could not load this workspace.',
-          );
-        }
-      } finally {
-        if (!cancelled) setLoadingData(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [authLoading, user, workspaceId, loadSidebar]);
+    try {
+      const [convos, brandList, campaignList] = await Promise.all([
+        api.listConversations(workspaceId),
+        api.listBrands(workspaceId),
+        api.listCampaigns(workspaceId),
+      ]);
+      setConversations(convos);
+      setBrands(brandList);
+      setCampaigns(campaignList);
+      if (brandList.length && !brandId) setBrandId(brandList[0].id);
+    } catch (err) {
+      setError(
+        err instanceof ApiError && err.status === 404
+          ? 'That workspace does not exist, or you no longer have access to it.'
+          : 'We could not load this workspace.',
+      );
+    }
+  }, [workspaceId, brandId]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView?.({ behavior: 'smooth' });
-  }, [messages, sending]);
+    if (user) void loadSidebar();
+    // loadSidebar changes with brandId; only re-run on workspace/user change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, workspaceId]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   async function openConversation(id: string) {
-    setError(null);
     setActiveId(id);
-    setMessages([]);
+    setHistoryLoading(true);
+    setError(null);
     try {
       const detail = await api.getConversation(workspaceId, id);
       setMessages(detail.messages);
     } catch {
-      setError('Could not open that conversation.');
+      setError('We could not load that conversation.');
+    } finally {
+      setHistoryLoading(false);
     }
+  }
+
+  function startNew() {
+    setActiveId(null);
+    setMessages([]);
+    setError(null);
   }
 
   async function send(e: React.FormEvent) {
@@ -110,215 +90,236 @@ export default function WorkspacePage() {
     const text = prompt.trim();
     if (!text || sending) return;
 
-    setPrompt('');
-    setSending(true);
     setError(null);
-    // Optimistic echo so the UI feels immediate; replaced by server state below.
-    const optimistic: Message = {
-      id: `local-${Date.now()}`,
+    setSending(true);
+    setPrompt('');
+
+    // Optimistic echo so the interface responds immediately; the id is
+    // replaced when the server answers.
+    const optimistic: ChatMessage = {
+      id: `pending-${Date.now()}`,
       role: 'user',
       content: text,
-      model: null,
-      created_at: new Date().toISOString(),
+      sequence: messages.length,
     };
-    setMessages((m) => [...m, optimistic]);
+    setMessages((prev) => [...prev, optimistic]);
 
     try {
-      const res = await api.sendMessage(workspaceId, {
+      const result = await api.chat(workspaceId, {
         prompt: text,
         conversation_id: activeId ?? undefined,
         brand_id: brandId || undefined,
         campaign_id: campaignId || undefined,
       });
-      setActiveId(res.conversation_id);
-      const detail = await api.getConversation(workspaceId, res.conversation_id);
-      setMessages(detail.messages);
+      setActiveId(result.conversation_id);
+      setMessages((prev) => [...prev, result.message]);
       await loadSidebar();
     } catch (err) {
-      setMessages((m) => m.filter((x) => x.id !== optimistic.id));
+      // Roll the optimistic message back so the transcript matches the server.
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setPrompt(text);
-      setError(
-        err instanceof ApiError
-          ? err.status === 429
-            ? 'You are sending messages too quickly. Give it a moment.'
-            : err.message
-          : 'The assistant could not respond.',
-      );
+      if (err instanceof ApiError && err.status === 422) {
+        // The selected brand or campaign no longer resolves in this
+        // workspace; the server refuses rather than answering ungrounded.
+        setError('That brand or campaign is no longer available. Pick another.');
+        await loadSidebar();
+      } else if (err instanceof ApiError && err.status === 403) {
+        setError('Your role in this workspace does not allow sending messages.');
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError('Too many requests. Please wait a moment.');
+      } else if (err instanceof ApiError && err.status >= 502) {
+        setError('The AI provider is unavailable right now. Please try again.');
+      } else {
+        setError('We could not send that message.');
+      }
     } finally {
       setSending(false);
     }
   }
 
-  if (authLoading || !user) return <Spinner label="Loading your session" />;
+  async function remove(id: string) {
+    try {
+      await api.deleteConversation(workspaceId, id);
+      if (activeId === id) startNew();
+      await loadSidebar();
+    } catch {
+      setError('We could not delete that conversation.');
+    }
+  }
+
+  if (loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center">
+        <Spinner label="Loading workspace" />
+      </main>
+    );
+  }
+  if (!user) return null;
 
   return (
-    <AppShell>
-      <Link
-        href="/dashboard"
-        className="mb-4 inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200"
-      >
-        <ArrowLeft className="h-4 w-4" /> All workspaces
-      </Link>
-
-      {loadingData ? (
-        <Spinner label="Loading workspace" />
-      ) : (
-        <div className="grid gap-6 md:grid-cols-[260px_1fr]">
-          <aside>
-            <div role="tablist" aria-label="Workspace sections" className="mb-4 flex gap-1">
-              {TABS.map((t) => (
-                <button
-                  key={t.id}
-                  role="tab"
-                  aria-selected={tab === t.id}
-                  onClick={() => setTab(t.id)}
-                  className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${
-                    tab === t.id
-                      ? 'bg-indigo-500/15 text-indigo-200'
-                      : 'text-slate-400 hover:bg-ink-700'
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-
-            {tab === 'chats' && (
-              <div>
-                <div className="mb-3 flex items-center justify-between">
-                  <h2 className="label mb-0">Conversations</h2>
-                  <button
-                    className="btn-ghost px-2 py-1"
-                    onClick={() => {
-                      setActiveId(null);
-                      setMessages([]);
-                      setError(null);
-                    }}
-                    aria-label="New conversation"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                {conversations.length === 0 ? (
-                  <p className="text-sm text-slate-500">No conversations yet.</p>
-                ) : (
-                  <ul className="space-y-1" aria-label="Conversations">
-                    {conversations.map((c) => (
-                      <li key={c.id}>
-                        <button
-                          onClick={() => void openConversation(c.id)}
-                          className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${
-                            c.id === activeId
-                              ? 'bg-indigo-500/15 text-indigo-200'
-                              : 'text-slate-400 hover:bg-ink-700'
-                          }`}
-                        >
-                          <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{c.title}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            {tab === 'brands' && (
-              <BrandPanel workspaceId={workspaceId} brands={brands} onCreated={loadSidebar} />
-            )}
-
-            {tab === 'campaigns' && (
-              <CampaignPanel
-                workspaceId={workspaceId}
-                campaigns={campaigns}
-                brands={brands}
-                onCreated={loadSidebar}
-              />
-            )}
-          </aside>
-
-          <section className="flex min-h-[60vh] flex-col rounded-xl border border-ink-600 bg-ink-800">
-            <div className="flex-1 space-y-4 overflow-y-auto p-5">
-              {messages.length === 0 && !sending ? (
-                <Empty
-                  title="Start a new conversation"
-                  body="Describe the post you need — platform, angle, and audience."
-                />
-              ) : (
-                messages.map((m) => <Bubble key={m.id} message={m} />)
-              )}
-              {sending && (
-                <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Generating…
-                </div>
-              )}
-              <div ref={bottomRef} />
-            </div>
-
-            <form onSubmit={send} className="space-y-3 border-t border-ink-600 p-4">
-              <ErrorBanner message={error} />
-              <div className="flex flex-wrap gap-2">
+    <main className="flex h-screen flex-col">
+      <header className="border-b border-slate-800">
+        <div className="flex items-center justify-between px-6 py-3">
+          <div className="flex items-center gap-3">
+            <Link href="/dashboard" className="btn-ghost px-2 py-1" aria-label="Back to dashboard">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+            <span className="flex items-center gap-2 font-semibold text-white">
+              <Sparkles className="h-4 w-4 text-indigo-400" /> Workspace
+            </span>
+          </div>
+          <div className="flex items-center gap-4">
+            {brands.length > 0 && (
+              <div className="flex items-center gap-2">
+                <label htmlFor="brand" className="text-xs text-slate-500">
+                  Brand voice
+                </label>
                 <select
-                  className="input max-w-[160px]"
+                  id="brand"
+                  className="input w-auto py-1.5 text-xs"
                   value={brandId}
                   onChange={(e) => setBrandId(e.target.value)}
-                  aria-label="Brand voice"
                 >
-                  <option value="">No brand</option>
                   {brands.map((b) => (
                     <option key={b.id} value={b.id}>
                       {b.name}
                     </option>
                   ))}
                 </select>
+              </div>
+            )}
+            {campaigns.length > 0 && (
+              <div className="flex items-center gap-2">
+                <label htmlFor="campaign" className="text-xs text-slate-500">
+                  Campaign
+                </label>
                 <select
-                  className="input max-w-[160px]"
+                  id="campaign"
+                  className="input w-auto py-1.5 text-xs"
                   value={campaignId}
                   onChange={(e) => setCampaignId(e.target.value)}
-                  aria-label="Campaign"
                 >
-                  <option value="">No campaign</option>
+                  <option value="">None</option>
                   {campaigns.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
                     </option>
                   ))}
                 </select>
-                <input
-                  className="input min-w-[200px] flex-1"
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  placeholder="Write a LinkedIn post announcing our Series A…"
-                  aria-label="Prompt"
-                  disabled={sending}
-                />
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <aside className="hidden w-72 shrink-0 flex-col border-r border-slate-800 md:flex">
+          <div className="p-3">
+            <button onClick={startNew} className="btn-primary w-full">
+              <MessageSquarePlus className="h-4 w-4" /> New conversation
+            </button>
+          </div>
+          <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+            {conversations.map((c) => (
+              <div
+                key={c.id}
+                className={`group mb-1 flex items-center gap-1 rounded-lg px-2 py-2 text-sm transition ${
+                  activeId === c.id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:bg-slate-900'
+                }`}
+              >
+                <button onClick={() => void openConversation(c.id)} className="min-w-0 flex-1 truncate text-left">
+                  {c.title}
+                  <span className="ml-1 text-[11px] text-slate-600">({c.message_count})</span>
+                </button>
                 <button
-                  className="btn-primary"
-                  disabled={sending || !prompt.trim()}
-                  aria-label="Send message"
+                  onClick={() => void remove(c.id)}
+                  aria-label={`Delete ${c.title}`}
+                  className="opacity-0 transition group-hover:opacity-100 hover:text-red-400"
                 >
-                  <Send className="h-4 w-4" />
+                  <Trash2 className="h-3.5 w-3.5" />
                 </button>
               </div>
-            </form>
-          </section>
-        </div>
-      )}
-    </AppShell>
-  );
-}
+            ))}
+            {conversations.length === 0 && (
+              <p className="px-2 py-6 text-center text-xs text-slate-600">No conversations yet.</p>
+            )}
+          </nav>
+          <div className="border-t border-slate-800 p-3">
+            <CampaignPanel
+              workspaceId={workspaceId}
+              campaigns={campaigns}
+              brands={brands}
+              onCreated={loadSidebar}
+            />
+          </div>
+        </aside>
 
-function Bubble({ message }: { message: Message }) {
-  const isUser = message.role === 'user';
-  return (
-    <div className={isUser ? 'flex justify-end' : 'flex justify-start'}>
-      <div
-        className={`max-w-[85%] whitespace-pre-wrap rounded-xl px-4 py-3 text-sm leading-relaxed ${
-          isUser ? 'bg-indigo-500 text-white' : 'border border-ink-600 bg-ink-900 text-slate-200'
-        }`}
-      >
-        {message.content}
+        <section className="flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
+            <div className="mx-auto max-w-3xl space-y-4">
+              {error && <ErrorBanner message={error} />}
+              {historyLoading && <Spinner label="Loading conversation" />}
+
+              {!historyLoading && messages.length === 0 && (
+                <EmptyState
+                  title="Start a conversation"
+                  body="Ask for a launch tweet, a LinkedIn post, or a week of captions."
+                />
+              )}
+
+              {messages.map((m) => (
+                <div
+                  key={m.id}
+                  className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                      m.role === 'user'
+                        ? 'bg-indigo-600 text-white'
+                        : 'border border-slate-800 bg-slate-900 text-slate-200'
+                    }`}
+                  >
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+
+              {sending && (
+                <div className="flex justify-start">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3">
+                    <Spinner label="Writing" />
+                  </div>
+                </div>
+              )}
+              <div ref={bottomRef} />
+            </div>
+          </div>
+
+          <form onSubmit={send} className="border-t border-slate-800 p-4">
+            <div className="mx-auto flex max-w-3xl items-end gap-2">
+              <textarea
+                className="input min-h-[52px] resize-y"
+                rows={1}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void send(e as unknown as React.FormEvent);
+                  }
+                }}
+                placeholder="Write a launch tweet for our new espresso blend…"
+                aria-label="Your message"
+                disabled={sending}
+              />
+              <button type="submit" className="btn-primary h-[52px]" disabled={sending || !prompt.trim()}>
+                {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                <span className="hidden sm:inline">Send</span>
+              </button>
+            </div>
+          </form>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }

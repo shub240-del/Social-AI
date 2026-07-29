@@ -2,24 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
-
-body {
-  @apply bg-ink-900 text-slate-200 antialiased;
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-slate-950 text-slate-200 antialiased;
+  }
+  /* A visible focus ring is the difference between usable and unusable for
+     keyboard navigation; never remove it without a replacement. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-indigo-400 ring-offset-2 ring-offset-slate-950;
+  }
 }
 
-.card {
-  @apply rounded-xl border border-ink-600 bg-ink-800 p-5;
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-800 bg-slate-900/60 p-6 shadow-lg shadow-black/20;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white
+           placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none
+           focus:ring-1 focus:ring-indigo-500 disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2
+           text-sm font-medium text-white transition hover:bg-indigo-500
+           disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700
+           px-4 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-800
+           disabled:opacity-60;
+  }
 }
-.btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm
-         font-medium transition disabled:cursor-not-allowed disabled:opacity-50;
-}
-.btn-primary { @apply btn bg-indigo-500 text-white hover:bg-indigo-400; }
-.btn-ghost   { @apply btn border border-ink-600 text-slate-300 hover:bg-ink-700; }
-.input {
-  @apply w-full rounded-lg border border-ink-600 bg-ink-900 px-3 py-2 text-sm
-         text-slate-100 outline-none placeholder:text-slate-500
-         focus:border-indigo-500;
-}
-.label { @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-400; }
