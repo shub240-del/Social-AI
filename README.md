@@ -1,215 +1,164 @@
 # Social AI
 
-An AI social-media content platform: workspaces, brands, campaigns, and an
-LLM-backed chat assistant, behind self-hosted RS256 authentication.
+AI social-media content platform. FastAPI API + Next.js web app, multi-tenant by
+workspace, with brand-grounded chat generation.
 
-FastAPI + SQLAlchemy (async) on the backend, Next.js 14 App Router on the
-frontend, PostgreSQL for storage, Sakana AI (Fugu) for completions.
+> **Provenance.** This tree was generated to match the architecture described in
+> `socialai-architecture-report.html`. The original application source was never
+> supplied — only root config files — so this is a working implementation, not a
+> patch against an existing repo. Diff it against your tree before merging.
 
----
-
-## What is actually here
-
-Earlier revisions of this README described `ai_core`, `ai_agents`,
-`api_gateway`, `workflow_engine`, `publishing_service`, `analytics_service` and
-`billing_service`. None of those existed. The list below is the repository as it
-stands; every directory named is present and covered by tests.
+## Layout
 
 ```
-apps/
-  web/                     Next.js 14 frontend (App Router, Tailwind)
-packages/
-  shared_core/
-    ai/                    provider abstraction: base, sakana, mock, factory
-    db/                    async engine, session, ORM models
-    email/                 console / memory / SMTP senders
-    middleware/            request context, security headers, rate limiting
-    security/              password hashing, RBAC permission matrix
-    config.py              settings + fail-fast production validation
-    logging.py             structured logging with secret redaction
-    observability.py       optional Sentry wiring
-services/
-  identity_service/
-    auth/                  token issuing, request dependencies
-    routers/               auth, account, health, workspaces, brands,
-                           campaigns, chat, admin
-    services/              user provisioning
-    schemas.py             request/response models
-    main.py                app factory, error handlers, middleware order
-    worker.py              gunicorn worker that suppresses the Server header
-migrations/                Alembic revisions
-tests/                     unit, integration, live journey, deploy verification
+packages/shared_core/     config, db, security, ai, middleware, logging
+services/identity_service/ FastAPI app: auth, workspaces, brands, campaigns, chat
+migrations/               Alembic (env reads MIGRATION_DATABASE_URL, then DATABASE_URL)
+apps/web/                 Next.js 14 App Router frontend
+tests/                    backend unit + integration + live-server API E2E
+apps/web/tests/           UI journey against a live backend
 ```
 
-### Data model
+## Run it locally
 
-Nine tables: `users`, `refresh_tokens`, `verification_tokens`, `workspaces`,
-`memberships`, `brands`, `campaigns`, `conversations`, `messages`.
-
-Primary keys are 36-character string UUIDs so the same schema runs on both
-SQLite (local/CI) and PostgreSQL (deployed) with no branching.
-
-### AI provider
-
-The application depends only on `BaseAIProvider`. `routers/chat.py` calls
-`get_llm_client()` and never names a vendor, so replacing the provider is a
-change to `packages/shared_core/ai/` alone:
-
-```
-ai/base.py            the contract: complete(), stream(), message validation
-ai/types.py           ChatMessage / Completion, provider-neutral
-ai/errors.py          provider HTTP status -> application exception
-ai/retry.py           capped exponential backoff with jitter
-ai/sakana_client.py   Sakana AI (Fugu), OpenAI-compatible chat completions
-ai/mock_client.py     deterministic provider for dev, tests and CI
-ai/factory.py         the single place that chooses one
-```
-
-Sakana's Fugu is a multi-agent system that orchestrates several frontier models
-per request, so it is much slower than a single-model API; the default timeout
-is 120s. A key with no active subscription authenticates successfully but
-answers every completion with `429 usage_limit_reached`. That is a billing
-state rather than a burst limit, so it is raised immediately as a configuration
-error instead of being retried.
-
-### Authentication
-
-Self-hosted RS256 JWTs. Access tokens are short lived; refresh tokens rotate
-within a `family_id`, and presenting an already-rotated token revokes the entire
-family as replay defence.
-
-Auth0 settings remain as an optional legacy path for verifying externally minted
-tokens. They are unset by default.
-
----
-
-## Quick start
-
-Requires Python 3.12+, Node 20+, and pnpm 9.
-
-### Backend
+Backend:
 
 ```bash
+python -m venv .venv && source .venv/bin/activate
+pip install '.[dev]'
 cp .env.example .env
-poetry install --extras monitoring
-
-# Defaults in .env.example point at Postgres. For a zero-dependency start,
-# override with sqlite:
-export DATABASE_URL="sqlite+aiosqlite:///./socialai_dev.db"
-export MIGRATION_DATABASE_URL="sqlite:///./socialai_dev.db"
-
-poetry run alembic upgrade head
-poetry run uvicorn services.identity_service.main:app --reload --port 8000
+export PYTHONPATH=.
+alembic upgrade head
+uvicorn services.identity_service.main:app --reload --port 8000
 ```
 
-- API: <http://127.0.0.1:8000>
-- OpenAPI docs: <http://127.0.0.1:8000/docs> (disabled when `ENVIRONMENT=production`)
-- Liveness: `/healthz` · Readiness (checks the database): `/readyz`
+With no `NVIDIA_API_KEY` set, the AI layer serves deterministic mock
+completions so the whole product is usable offline. `/readyz` reports this as
+`ai: degraded/mock`.
 
-With no `SAKANA_API_KEY` set and `ALLOW_MOCK_LLM=true`, chat responds from a mock
-provider whose output always contains the word "mock", so a misconfigured deploy
-is detectable rather than plausible.
-
-With `EMAIL_BACKEND=console`, verification and password-reset emails print to
-stdout; copy the link from the server log.
-
-### Frontend
+Frontend:
 
 ```bash
-pnpm install
-NEXT_PUBLIC_API_URL=http://127.0.0.1:8000 pnpm run dev
+cd apps/web
+npm ci
+cp .env.local.example .env.local   # points at http://127.0.0.1:8000
+npm run dev
 ```
 
-Opens on <http://127.0.0.1:3000>. Keep that origin in `ALLOWED_ORIGINS`.
+## Tests
 
-### Everything at once
+| Suite | Command | Count |
+|---|---|---|
+| Backend unit + integration | `pytest tests -q` | 98 |
+| API end-to-end (live server) | `python tests/e2e_flow.py` | 49 |
+| Security probes (live server) | `python tests/security_probe.py` | 64 |
+| Performance budget (live server) | `python tests/perf_probe.py` | 9 endpoints |
+| UI journey + account flows (live server) | `cd apps/web && npx vitest run` | 26 |
+| Lint | `ruff check .` / `npx next lint` | — |
+| Types | `cd apps/web && npx tsc --noEmit` | — |
+| Schema drift | `alembic check` | — |
+| Post-deploy (needs a deployment) | `python tests/post_deploy_verify.py --api … --web …` | 24 |
+
+The live-server suites need the API running on `127.0.0.1:8000` with the
+rate limits relaxed. The account-flow UI tests additionally read the
+verification and reset links out of the server log, so send its output to a
+file and point `SERVER_LOG` at it:
 
 ```bash
-docker compose up --build     # Postgres + API, migrations run on start
+RATE_LIMIT_AUTH_PER_MINUTE=500 RATE_LIMIT_CHAT_PER_MINUTE=500 \
+RATE_LIMIT_DEFAULT_PER_MINUTE=5000 ALLOW_MOCK_LLM=true \
+EMAIL_BACKEND=console FRONTEND_BASE_URL=http://127.0.0.1:3000 \
+uvicorn services.identity_service.main:app --port 8000 > /tmp/server.log 2>&1
+
+# then, in apps/web
+SERVER_LOG=/tmp/server.log npx vitest run
 ```
 
----
+The UI journey covers the full path: homepage → register → dashboard →
+workspace → create brand → create campaign → chat → prompt → AI response →
+history → reload/persistence → logout → login again.
 
-## Testing
+`tests/account.test.tsx` covers the parts that need an inbox: requesting a
+verification link, confirming it, expiry and reuse of both link types, and a
+password reset that leaves the old password dead and every session revoked.
+
+## Security model
+
+- **Tokens.** RS256 access (15 min) + rotating refresh (14 d). Refresh tokens are
+  stored hashed; reuse of a rotated token revokes the family. Logout revokes.
+- **Tenant isolation.** Every workspace-scoped query is filtered by membership.
+  Cross-tenant reads return **404, not 403**, so existence is not disclosed.
+- **Privilege escalation.** A member may only grant roles strictly below their
+  own rank; granting an equal rank is refused.
+- **Rate limits.** Separate buckets for credential endpoints, chat, and
+  everything else, keyed per client. In-process only — move the counters to
+  Redis before running more than a couple of replicas.
+- **Config.** Production start-up fails on SQLite, missing JWT keys, wildcard
+  CORS, a missing `NVIDIA_API_KEY`, or `ALLOW_MOCK_LLM=true`.
+- **Prompt grounding.** Brand and campaign lookups are workspace-scoped, so an
+  id from another tenant is rejected rather than leaking that tenant's
+  positioning into the prompt. User text is wrapped in a `<user_request>`
+  boundary.
+
+## Deploy
+
+**Database — Supabase.** Two URLs, and the distinction matters:
+
+- `DATABASE_URL` → port **6543** (transaction pooler) for runtime. The engine
+  sets `statement_cache_size=0`, which asyncpg requires against the pooler.
+- `MIGRATION_DATABASE_URL` → port **5432** (direct) for Alembic. DDL through the
+  pooler is unreliable.
+
+**Backend — Railway.** `railway.toml` builds the `Dockerfile` and runs
+`alembic upgrade head` before starting gunicorn, so a bad migration fails the
+deploy rather than half-upgrading the fleet. Health check is `/readyz`. Set
+every variable from `.env.example`; at minimum `ENVIRONMENT=production`,
+`DATABASE_URL`, `MIGRATION_DATABASE_URL`, `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`,
+`NVIDIA_API_KEY`, `ALLOW_MOCK_LLM=false`, and `ALLOWED_ORIGINS` set to your
+Vercel origin.
+
+Generate the keypair:
 
 ```bash
-poetry run pytest -q                     # unit + integration
-poetry run ruff check .                  # lint + import order + formatting rules
-poetry run mypy packages services tests  # strict; enforced in CI
-pnpm run lint && pnpm run typecheck && pnpm run build
-
-# Against a running server:
-poetry run python tests/e2e_journey.py --api http://127.0.0.1:8000 --log api.log
-poetry run python tests/post_deploy_verify.py --api https://api.example.com
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out private.pem
+openssl rsa -in private.pem -pubout -out public.pem
 ```
 
-`e2e_journey.py` walks a real user through registration, email verification,
-login, workspace/brand/campaign creation, chat, token refresh, logout and
-re-login. It reads verification links out of the server log, so it needs
-`--log` pointed at the console-email output.
+**Frontend — Vercel.** Root directory `apps/web`. Set `NEXT_PUBLIC_API_URL` to
+the Railway URL. This value is inlined at build time, so changing it requires a
+redeploy, not just an env edit.
 
-`post_deploy_verify.py` is the release gate: it checks health, TLS, security
-headers, CORS behaviour, error-envelope shape, that docs are closed in
-production, and that the deployment is not silently running the mock LLM.
+## Verifying a deployment
 
-Migration drift is enforced in CI with `alembic check`, which fails when the ORM
-models and the migration history disagree.
-
-`ruff` is the only Python formatter and linter; `black` was removed because
-`ruff-format` already covers it and running both meant two formatters competing
-for the same files. `mypy` is the only type checker, and CI runs it — it was
-configured `strict` from the start but never invoked, which had let 27 type
-errors accumulate unnoticed.
-
----
-
-## Deployment
-
-| Component | Target |
-| --- | --- |
-| Frontend | Vercel (`apps/web`) |
-| Backend | Railway (`Dockerfile`, `railway.toml`) |
-| Database | Supabase or Neon PostgreSQL |
-
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the full procedure.
-
-Two details that cause most first-deploy failures:
-
-1. Alembic cannot use the `asyncpg` driver. `MIGRATION_DATABASE_URL` must be a
-   `postgresql+psycopg2://` URL against the direct `:5432` endpoint, while
-   `DATABASE_URL` uses `postgresql+asyncpg://` against the `:6543` pooler.
-2. On the `:6543` transaction pooler, append
-   `?prepared_statement_cache_size=0` or asyncpg will intermittently fail with
-   "prepared statement already exists".
-
-`ENVIRONMENT=production` refuses to boot on a SQLite URL, missing JWT keys, a
-mock-LLM flag, a missing Sakana key, wildcard or plaintext CORS origins, a
-console email backend, or a non-HTTPS frontend URL.
-
----
-
-## Known limitations
-
-- Rate limiting is an in-process fixed window over three per-client buckets
-  (credential, chat, default), so the effective limit is the configured value
-  multiplied by the replica count. A shared store is required before scaling
-  horizontally.
-- Next.js carries an open advisory for the Image Optimizer and RSC
-  deserialization with no fixed stable release at time of writing. This app
-  configures no `remotePatterns`, so the image path is not reachable.
-
-## Security notice
-
-A live NVIDIA API key was committed to `.env.production` in this public
-repository's history. NVIDIA is no longer used, but removing the file from the
-working tree did not remove the key: **it remains in git history** and must be
-revoked at build.nvidia.com and purged:
+`tests/post_deploy_verify.py` is the post-deploy gate. It checks the things
+that can only be wrong once the app is public: TLS and the http redirect, the
+production config guards having actually taken effect, security headers
+surviving the platform proxy, CORS matching the real frontend origin, the
+OpenAPI schema being closed, and every replica accepting a token minted by
+another one.
 
 ```bash
-git filter-repo --path .env.production --invert-paths
-git push --force
+python tests/post_deploy_verify.py \
+  --api https://api.example.com \
+  --web https://app.example.com \
+  --write        # optional: real signup + chat, leaves an account behind
 ```
 
-## License
+`--write` also asserts the reply did not come from the mock LLM provider,
+which is the cheapest way to catch `ALLOW_MOCK_LLM` reaching production.
+A non-zero exit means the deployment is not verified.
 
-See [LICENSE](LICENSE).
+## Known limits
+
+- Rate limiting is per process, so the effective limit is `limit × replicas`.
+- `REQUIRE_EMAIL_VERIFICATION` ships as `false`. Turning it on before SMTP is
+  configured and before existing users have verified will lock them all out.
+- There is no separate "project" entity: a **campaign** is the unit of work
+  inside a workspace, and it is what scopes a chat. If the product needs the
+  word "project", that is a rename, not a new table.
+- Error monitoring is an optional extra (`pip install -e '.[monitoring]'`) and
+  is inert unless `SENTRY_DSN` is set.
+- The frontend keeps tokens in `localStorage`, which is XSS-readable. Moving to
+  httpOnly cookies requires a same-site deployment or a CORS credential setup.
+- `alembic upgrade head` in the start command serialises deploys; for zero
+  downtime, split it into a dedicated release job.

@@ -1,147 +1,65 @@
-"""Roles, permissions and the checks that enforce them.
+"""Authorization decisions.
 
-Permissions are granted per role and evaluated against the caller's role *in
-the workspace being touched* — never against a global role. A user can be an
-owner of one workspace and have no access at all to another.
+Fails closed everywhere. Cross-tenant reads return 404 rather than 403 so the
+API does not confirm the existence of resources in workspaces the caller
+cannot see.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
-
-from packages.shared_core.exceptions import PermissionDeniedError
-
-
-class Role(StrEnum):
-    OWNER = "owner"
-    ADMIN = "admin"
-    EDITOR = "editor"
-    MEMBER = "member"
-    VIEWER = "viewer"
-
-
-class Permission(StrEnum):
-    WORKSPACE_READ = "workspace:read"
-    WORKSPACE_UPDATE = "workspace:update"
-    WORKSPACE_DELETE = "workspace:delete"
-    MEMBER_READ = "member:read"
-    MEMBER_INVITE = "member:invite"
-    MEMBER_REMOVE = "member:remove"
-    MEMBER_ROLE_UPDATE = "member:role_update"
-    BRAND_READ = "brand:read"
-    BRAND_WRITE = "brand:write"
-    BRAND_DELETE = "brand:delete"
-    CAMPAIGN_READ = "campaign:read"
-    CAMPAIGN_WRITE = "campaign:write"
-    CAMPAIGN_DELETE = "campaign:delete"
-    CHAT_READ = "chat:read"
-    CHAT_WRITE = "chat:write"
-
-
-_VIEWER: frozenset[Permission] = frozenset(
-    {
-        Permission.WORKSPACE_READ,
-        Permission.MEMBER_READ,
-        Permission.BRAND_READ,
-        Permission.CAMPAIGN_READ,
-        Permission.CHAT_READ,
-    }
+from packages.shared_core.exceptions import AuthorizationError, NotFoundError
+from packages.shared_core.security.roles import (
+    ROLE_RANK,
+    Permission,
+    Role,
+    permissions_for,
 )
-
-# A member can use the product; an editor can additionally shape it.
-_MEMBER: frozenset[Permission] = _VIEWER | {Permission.CHAT_WRITE}
-
-_EDITOR: frozenset[Permission] = _MEMBER | {
-    Permission.BRAND_WRITE,
-    Permission.CAMPAIGN_WRITE,
-}
-
-_ADMIN: frozenset[Permission] = _EDITOR | {
-    Permission.WORKSPACE_UPDATE,
-    Permission.MEMBER_INVITE,
-    Permission.MEMBER_REMOVE,
-    Permission.MEMBER_ROLE_UPDATE,
-    Permission.BRAND_DELETE,
-    Permission.CAMPAIGN_DELETE,
-}
-
-# Only the owner may delete the workspace itself.
-_OWNER: frozenset[Permission] = _ADMIN | {Permission.WORKSPACE_DELETE}
-
-ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
-    Role.VIEWER: _VIEWER,
-    Role.MEMBER: _MEMBER,
-    Role.EDITOR: _EDITOR,
-    Role.ADMIN: _ADMIN,
-    Role.OWNER: _OWNER,
-}
-
-# Used to answer "can this role act on that role", e.g. an admin must not be
-# able to demote an owner.
-ROLE_RANK: dict[Role, int] = {
-    Role.VIEWER: 0,
-    Role.MEMBER: 1,
-    Role.EDITOR: 2,
-    Role.ADMIN: 3,
-    Role.OWNER: 4,
-}
+from packages.shared_core.security.user_context import UserContext
 
 
-def parse_role(value: str) -> Role:
-    try:
-        return Role(value)
-    except ValueError:
-        # An unrecognised role in the database must fail closed.
-        return Role.VIEWER
-
-
-def permissions_for(role: Role | str) -> frozenset[Permission]:
-    if isinstance(role, str):
-        role = parse_role(role)
-    return ROLE_PERMISSIONS.get(role, frozenset())
-
-
-def has_permission(role: Role | str, permission: Permission) -> bool:
+def has_permission(ctx: UserContext, workspace_id: str, permission: Permission) -> bool:
+    if ctx.is_superuser:
+        return True
+    role = ctx.role_in(workspace_id)
+    if role is None:
+        return False
     return permission in permissions_for(role)
 
 
-def outranks(actor: Role | str, target: Role | str) -> bool:
-    a = parse_role(actor) if isinstance(actor, str) else actor
-    t = parse_role(target) if isinstance(target, str) else target
-    return ROLE_RANK[a] > ROLE_RANK[t]
+def assert_member(ctx: UserContext, workspace_id: str) -> None:
+    """Caller must belong to the workspace.
+
+    Raises NotFoundError, not AuthorizationError: a non-member must not be able
+    to distinguish 'workspace exists but is denied' from 'no such workspace'.
+    """
+    if ctx.is_superuser or ctx.is_member_of(workspace_id):
+        return
+    raise NotFoundError("Workspace not found.")
 
 
-@dataclass(frozen=True, slots=True)
-class UserContext:
-    """Who is calling, and what they may do in the current workspace."""
-
-    user_id: str
-    email: str
-    is_superuser: bool = False
-    workspace_id: str | None = None
-    role: Role | None = None
-    permissions: frozenset[Permission] = field(default_factory=frozenset)
-
-    def can(self, permission: Permission) -> bool:
-        return permission in self.permissions
-
-    def require(self, permission: Permission) -> None:
-        if not self.can(permission):
-            raise PermissionDeniedError(
-                f"Your role does not allow {permission}.",
-                details={"required_permission": str(permission)},
-            )
+def assert_permission(ctx: UserContext, workspace_id: str, permission: Permission) -> None:
+    assert_member(ctx, workspace_id)
+    if not has_permission(ctx, workspace_id, permission):
+        raise AuthorizationError(
+            f"Role '{ctx.role_in(workspace_id)}' lacks permission '{permission.value}'.",
+            details={"required_permission": permission.value},
+        )
 
 
-__all__ = [
-    "ROLE_PERMISSIONS",
-    "ROLE_RANK",
-    "Permission",
-    "Role",
-    "UserContext",
-    "has_permission",
-    "outranks",
-    "parse_role",
-    "permissions_for",
-]
+def assert_can_assign_role(ctx: UserContext, workspace_id: str, target_role: Role) -> None:
+    """Block privilege escalation.
+
+    A principal may only grant roles strictly below their own rank, so an admin
+    can never mint another owner, nor promote themselves.
+    """
+    assert_permission(ctx, workspace_id, Permission.MEMBER_ROLE_UPDATE)
+    if ctx.is_superuser:
+        return
+    actor_role = ctx.role_in(workspace_id)
+    if actor_role is None:
+        raise AuthorizationError("You are not a member of this workspace.")
+    if ROLE_RANK[Role(target_role)] >= ROLE_RANK[Role(actor_role)]:
+        raise AuthorizationError(
+            "You cannot assign a role equal to or above your own.",
+            details={"your_role": actor_role, "attempted_role": str(target_role)},
+        )

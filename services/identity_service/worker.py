@@ -1,20 +1,16 @@
-"""Gunicorn worker used in production.
+"""Gunicorn worker class for the API.
 
-Uvicorn writes its own ``Server: uvicorn`` header when it serialises the
-response, *after* application middleware has run. Setting the header in
-middleware therefore produces ``Server: uvicorn, socialai`` rather than
-replacing it, which still tells an attacker exactly which server and
-(by behaviour) which version is running.
+Two settings cannot be applied from application middleware:
 
-``server_header=False`` stops uvicorn emitting its own, leaving only the value
-``SecurityHeadersMiddleware`` sets.
+``server_header``
+    Uvicorn writes ``Server: uvicorn`` in the protocol layer, after every
+    middleware has run, so a handler cannot remove or replace it. Advertising
+    the exact server makes CVE matching trivial for scanners.
 
-``date_header`` is left on: proxies and caches rely on it.
-
-Used as::
-
-    gunicorn services.identity_service.main:app \
-        -k services.identity_service.worker.SecureUvicornWorker
+``proxy_headers`` / ``forwarded_allow_ips``
+    Behind Railway's edge every connection originates from the proxy. Without
+    these, ``request.client.host`` is the proxy address, which would put all
+    users in one rate-limit bucket.
 """
 
 from __future__ import annotations
@@ -22,12 +18,10 @@ from __future__ import annotations
 from uvicorn.workers import UvicornWorker
 
 
-class SecureUvicornWorker(UvicornWorker):
+class SocialAIWorker(UvicornWorker):
     CONFIG_KWARGS = {
         "server_header": False,
-        "proxy_headers": True,   # trust X-Forwarded-* from the platform edge
+        "proxy_headers": True,
+        # Railway terminates TLS at its edge and is the only upstream hop.
         "forwarded_allow_ips": "*",
     }
-
-
-__all__ = ["SecureUvicornWorker"]

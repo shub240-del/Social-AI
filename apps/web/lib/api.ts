@@ -1,352 +1,261 @@
 /**
  * Typed API client.
  *
- * Access tokens are short-lived and kept in memory + localStorage; on a 401 the
- * client transparently refreshes once and replays the original request. Every
- * concurrent 401 shares a single in-flight refresh, because five parallel
- * dashboard requests must not rotate the refresh token five times — with
- * rotation enabled that would trip the server's replay detection and log the
- * user out.
+ * Handles token storage, automatic refresh on 401, and a single request
+ * de-duplication point so a burst of components cannot each trigger their own
+ * refresh round-trip.
  */
 
-const RAW_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
-export const API_BASE = RAW_BASE.replace(/\/$/, '');
-const V1 = `${API_BASE}/api/v1`;
+export const API_URL =
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') ?? 'http://127.0.0.1:8000';
+const API = `${API_URL}/api/v1`;
 
 const ACCESS_KEY = 'socialai.access';
 const REFRESH_KEY = 'socialai.refresh';
 
-export class ApiError extends Error {
-  status: number;
-  code: string;
-  details?: unknown;
+export type ApiErrorBody = { error: { code: string; message: string; details?: unknown } };
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+  ) {
     super(message);
     this.name = 'ApiError';
-    this.status = status;
-    this.code = code;
-    this.details = details;
   }
 }
 
 // ---- token storage ---------------------------------------------------
 
 export const tokens = {
-  get access(): string | null {
-    if (typeof window === 'undefined') return null;
-    return window.localStorage.getItem(ACCESS_KEY);
+  get access() {
+    return typeof window === 'undefined' ? null : localStorage.getItem(ACCESS_KEY);
   },
-  get refresh(): string | null {
-    if (typeof window === 'undefined') return null;
-    return window.localStorage.getItem(REFRESH_KEY);
+  get refresh() {
+    return typeof window === 'undefined' ? null : localStorage.getItem(REFRESH_KEY);
   },
   set(access: string, refresh: string) {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(ACCESS_KEY, access);
-    window.localStorage.setItem(REFRESH_KEY, refresh);
+    localStorage.setItem(ACCESS_KEY, access);
+    localStorage.setItem(REFRESH_KEY, refresh);
   },
   clear() {
-    if (typeof window === 'undefined') return;
-    window.localStorage.removeItem(ACCESS_KEY);
-    window.localStorage.removeItem(REFRESH_KEY);
+    localStorage.removeItem(ACCESS_KEY);
+    localStorage.removeItem(REFRESH_KEY);
   },
 };
 
+// ---- core request ----------------------------------------------------
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function doRefresh(): Promise<boolean> {
+  const refresh = tokens.refresh;
+  if (!refresh) return false;
+  try {
+    const res = await fetch(`${API}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refresh }),
+    });
+    if (!res.ok) {
+      tokens.clear();
+      return false;
+    }
+    const data = await res.json();
+    tokens.set(data.access_token, data.refresh_token);
+    return true;
+  } catch {
+    tokens.clear();
+    return false;
+  }
+}
+
+/** Collapses concurrent refreshes into one in-flight request. */
+function refreshOnce(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = doRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  retry = true,
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'application/json');
+  const access = tokens.access;
+  if (access) headers.set('Authorization', `Bearer ${access}`);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API}${path}`, { ...init, headers });
+  } catch {
+    throw new ApiError(0, 'network_error', 'Cannot reach the server. Is the API running?');
+  }
+
+  if (res.status === 401 && retry && tokens.refresh) {
+    if (await refreshOnce()) return request<T>(path, init, false);
+  }
+
+  if (res.status === 204) return undefined as T;
+
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : {};
+
+  if (!res.ok) {
+    const err = (body as ApiErrorBody).error;
+    throw new ApiError(
+      res.status,
+      err?.code ?? 'unknown',
+      err?.message ?? `Request failed (${res.status})`,
+    );
+  }
+  return body as T;
+}
+
 // ---- types -----------------------------------------------------------
 
-export interface TokenPair {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  expires_in: number;
-}
-
-export interface WorkspaceSummary {
-  id: string;
-  name: string;
-  slug: string;
-  role: string;
-}
-
-export interface Me {
+export type User = {
   id: string;
   email: string;
   full_name: string;
   is_active: boolean;
-  is_superuser: boolean;
   email_verified_at: string | null;
-  workspaces: WorkspaceSummary[];
-  permissions: string[];
-}
-
-export interface Brand {
+  created_at: string;
+};
+export type Workspace = {
+  id: string;
+  name: string;
+  slug: string;
+  owner_id: string;
+  created_at: string;
+  role: string | null;
+};
+export type Brand = {
   id: string;
   workspace_id: string;
   name: string;
   description: string;
-  tone: string;
-  audience: string;
-  keywords: string;
-}
-
-export interface Campaign {
+  tone_of_voice: string;
+  target_audience: string;
+  created_at: string;
+};
+export type Campaign = {
   id: string;
   workspace_id: string;
   brand_id: string | null;
   name: string;
   objective: string;
   status: string;
-  channel: string;
-}
-
-export interface ChatMessage {
+  created_at: string;
+};
+export type Message = {
   id: string;
   role: string;
   content: string;
-  sequence: number;
-  model?: string | null;
-  created_at?: string | null;
-}
-
-export interface Conversation {
+  model: string | null;
+  created_at: string;
+};
+export type Conversation = {
   id: string;
+  workspace_id: string;
   title: string;
   campaign_id: string | null;
-  message_count: number;
-  created_at?: string | null;
-  updated_at?: string | null;
-}
+  brand_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type ConversationDetail = Conversation & { messages: Message[] };
+export type Paged<T> = { items: T[]; page: { total: number; limit: number; offset: number } };
+export type TokenPair = {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+};
 
-export interface ConversationDetail extends Conversation {
-  messages: ChatMessage[];
-}
-
-export interface ChatResult {
-  conversation_id: string;
-  message: ChatMessage;
-  model: string;
-  provider: string;
-  latency_ms: number;
-  total_tokens: number;
-}
-
-// ---- core request ------------------------------------------------------
-
-interface RequestOptions {
-  method?: string;
-  body?: unknown;
-  auth?: boolean;
-  retryOn401?: boolean;
-}
-
-let refreshInFlight: Promise<boolean> | null = null;
-
-async function refreshAccessToken(): Promise<boolean> {
-  const refresh = tokens.refresh;
-  if (!refresh) return false;
-
-  // Collapse concurrent refreshes into one request.
-  if (!refreshInFlight) {
-    refreshInFlight = (async () => {
-      try {
-        const response = await fetch(`${V1}/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh_token: refresh }),
-        });
-        if (!response.ok) {
-          tokens.clear();
-          return false;
-        }
-        const data = (await response.json()) as TokenPair;
-        tokens.set(data.access_token, data.refresh_token);
-        return true;
-      } catch {
-        return false;
-      } finally {
-        // Cleared on the next tick so callers awaiting this promise all see it.
-        setTimeout(() => {
-          refreshInFlight = null;
-        }, 0);
-      }
-    })();
-  }
-  return refreshInFlight;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = true, retryOn401 = true } = options;
-
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (auth) {
-    const token = tokens.access;
-    if (token) headers.Authorization = `Bearer ${token}`;
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(`${V1}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch {
-    throw new ApiError(0, 'network_error', 'Could not reach the server. Check your connection.');
-  }
-
-  if (response.status === 401 && auth && retryOn401) {
-    const refreshed = await refreshAccessToken();
-    if (refreshed) {
-      return request<T>(path, { ...options, retryOn401: false });
-    }
-  }
-
-  if (response.status === 204) return undefined as T;
-
-  const text = await response.text();
-  let payload: unknown = null;
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = null;
-    }
-  }
-
-  if (!response.ok) {
-    const envelope = payload as { error?: { code?: string; message?: string; details?: unknown } };
-    throw new ApiError(
-      response.status,
-      envelope?.error?.code ?? 'http_error',
-      envelope?.error?.message ?? `Request failed (${response.status}).`,
-      envelope?.error?.details,
-    );
-  }
-
-  return payload as T;
-}
-
-// ---- public surface ------------------------------------------------------
+// ---- endpoints -------------------------------------------------------
 
 export const api = {
-  // auth
-  async register(email: string, password: string, fullName: string) {
-    const data = await request<TokenPair & { user: { id: string; email: string } }>(
-      '/auth/register',
-      { method: 'POST', auth: false, body: { email, password, full_name: fullName } },
-    );
-    tokens.set(data.access_token, data.refresh_token);
-    return data;
-  },
-
-  async login(email: string, password: string) {
-    const data = await request<TokenPair>('/auth/login', {
+  register: (email: string, password: string, full_name: string, workspace_name?: string) =>
+    request<TokenPair>('/auth/register', {
       method: 'POST',
-      auth: false,
-      body: { email, password },
-    });
-    tokens.set(data.access_token, data.refresh_token);
-    return data;
-  },
+      body: JSON.stringify({ email, password, full_name, workspace_name }),
+    }),
 
-  async logout() {
-    try {
-      await request('/auth/logout', {
+  login: (email: string, password: string) =>
+    request<TokenPair>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+
+  logout: async () => {
+    const refresh = tokens.refresh;
+    if (refresh) {
+      await request<void>('/auth/logout', {
         method: 'POST',
-        body: { refresh_token: tokens.refresh },
-      });
-    } finally {
-      // Local state is cleared even if the server call fails, otherwise a
-      // network blip leaves the user apparently signed in.
-      tokens.clear();
+        body: JSON.stringify({ refresh_token: refresh }),
+      }).catch(() => undefined);
     }
+    tokens.clear();
   },
 
-  me: () => request<Me>('/auth/me'),
+  me: () => request<{ user: User; workspaces: Workspace[] }>('/auth/me'),
 
-  // account
   requestVerification: (email: string) =>
     request<{ message: string }>('/auth/verify/request', {
       method: 'POST',
-      auth: false,
-      body: { email },
+      body: JSON.stringify({ email }),
     }),
-
   confirmVerification: (token: string) =>
     request<{ message: string }>('/auth/verify/confirm', {
       method: 'POST',
-      auth: false,
-      body: { token },
+      body: JSON.stringify({ token }),
     }),
-
   forgotPassword: (email: string) =>
     request<{ message: string }>('/auth/password/forgot', {
       method: 'POST',
-      auth: false,
-      body: { email },
+      body: JSON.stringify({ email }),
     }),
-
-  resetPassword: (token: string, newPassword: string) =>
+  resetPassword: (token: string, new_password: string) =>
     request<{ message: string }>('/auth/password/reset', {
       method: 'POST',
-      auth: false,
-      body: { token, new_password: newPassword },
+      body: JSON.stringify({ token, new_password }),
     }),
 
-  changePassword: (currentPassword: string, newPassword: string) =>
-    request<{ message: string }>('/auth/password/change', {
+  listWorkspaces: () => request<Workspace[]>('/workspaces'),
+  createWorkspace: (name: string) =>
+    request<Workspace>('/workspaces', { method: 'POST', body: JSON.stringify({ name }) }),
+
+  listBrands: (ws: string) => request<Paged<Brand>>(`/workspaces/${ws}/brands`),
+  createBrand: (ws: string, data: Partial<Brand> & { name: string }) =>
+    request<Brand>(`/workspaces/${ws}/brands`, {
       method: 'POST',
-      body: { current_password: currentPassword, new_password: newPassword },
+      body: JSON.stringify(data),
     }),
 
-  // workspaces
-  listWorkspaces: () => request<(WorkspaceSummary & { description: string })[]>('/workspaces'),
+  listCampaigns: (ws: string) => request<Paged<Campaign>>(`/workspaces/${ws}/campaigns`),
+  createCampaign: (ws: string, data: { name: string; objective?: string; brand_id?: string }) =>
+    request<Campaign>(`/workspaces/${ws}/campaigns`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
-  createWorkspace: (name: string, description = '') =>
-    request<WorkspaceSummary>('/workspaces', { method: 'POST', body: { name, description } }),
-
-  workspaceStats: (workspaceId: string) =>
-    request<{ brands: number; campaigns: number; members: number }>(
-      `/workspaces/${workspaceId}/stats`,
-    ),
-
-  // brands
-  listBrands: (workspaceId: string) => request<Brand[]>(`/workspaces/${workspaceId}/brands`),
-
-  createBrand: (workspaceId: string, body: Partial<Brand> & { name: string }) =>
-    request<Brand>(`/workspaces/${workspaceId}/brands`, { method: 'POST', body }),
-
-  // campaigns
-  listCampaigns: (workspaceId: string) =>
-    request<Campaign[]>(`/workspaces/${workspaceId}/campaigns`),
-
-  // brand_id and channel are accepted by CampaignCreate on the server; the
-  // client used to omit them, so a campaign could never be linked to a brand.
-  createCampaign: (
-    workspaceId: string,
-    body: { name: string; objective?: string; channel?: string; brand_id?: string },
-  ) => request<Campaign>(`/workspaces/${workspaceId}/campaigns`, { method: 'POST', body }),
-
-  // chat
-  chat: (
-    workspaceId: string,
+  listConversations: (ws: string) =>
+    request<Paged<Conversation>>(`/workspaces/${ws}/chat/conversations`),
+  getConversation: (ws: string, id: string) =>
+    request<ConversationDetail>(`/workspaces/${ws}/chat/conversations/${id}`),
+  sendMessage: (
+    ws: string,
     body: { prompt: string; conversation_id?: string; brand_id?: string; campaign_id?: string },
-  ) => request<ChatResult>(`/workspaces/${workspaceId}/chat`, { method: 'POST', body }),
-
-  listConversations: (workspaceId: string) =>
-    request<Conversation[]>(`/workspaces/${workspaceId}/chat/conversations`),
-
-  getConversation: (workspaceId: string, conversationId: string) =>
-    request<ConversationDetail>(`/workspaces/${workspaceId}/chat/conversations/${conversationId}`),
-
-  deleteConversation: (workspaceId: string, conversationId: string) =>
-    request<{ message: string }>(
-      `/workspaces/${workspaceId}/chat/conversations/${conversationId}`,
-      { method: 'DELETE' },
+  ) =>
+    request<{ conversation_id: string; message: Message; provider: string }>(
+      `/workspaces/${ws}/chat`,
+      { method: 'POST', body: JSON.stringify(body) },
     ),
 };
-
-export function isAuthenticated(): boolean {
-  return Boolean(tokens.access);
-}

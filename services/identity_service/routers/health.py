@@ -1,12 +1,8 @@
-"""Liveness and readiness.
+"""Liveness and readiness probes.
 
-``/healthz`` must never touch a dependency: it answers "is this process
-alive". If it checked the database, a brief database blip would make the
-orchestrator kill and restart otherwise-healthy containers, turning a small
-outage into a crash loop.
-
-``/readyz`` does check the database, because a process that cannot reach its
-database should be taken out of the load balancer.
+/healthz answers as long as the process is up. /readyz actually checks the
+dependencies, so a platform health check cannot route traffic to an instance
+whose database is unreachable.
 """
 
 from __future__ import annotations
@@ -17,6 +13,7 @@ import time
 from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
+from packages.shared_core.ai.nvidia_client import get_ai_client
 from packages.shared_core.config import get_settings
 from packages.shared_core.db.base import get_sessionmaker
 
@@ -27,59 +24,48 @@ router = APIRouter(tags=["health"])
 _STARTED_AT = time.time()
 
 
-@router.get("/healthz", summary="Liveness probe")
-async def healthz() -> dict[str, object]:
-    settings = get_settings()
+@router.get("/healthz")
+async def healthz() -> dict:
     return {
         "status": "ok",
-        "service": "identity_service",
-        "version": settings.release_version,
-        "environment": settings.environment,
+        "service": get_settings().service_name,
         "uptime_seconds": round(time.time() - _STARTED_AT, 1),
     }
 
 
-@router.get("/livez", summary="Liveness probe (alias)")
-async def livez() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@router.get("/readyz", summary="Readiness probe")
-async def readyz(response: Response) -> dict[str, object]:
+@router.get("/readyz")
+async def readyz(response: Response) -> dict:
     settings = get_settings()
-    checks: dict[str, object] = {}
+    checks: dict[str, dict] = {}
+    ready = True
 
     started = time.perf_counter()
     try:
-        factory = get_sessionmaker()
-        async with factory() as session:
+        async with get_sessionmaker()() as session:
             await session.execute(text("SELECT 1"))
         checks["database"] = {
             "status": "ok",
+            # The dialect name only ("postgresql", "sqlite") — never the URL,
+            # which carries credentials. This is what lets a post-deploy check
+            # catch the worst silent misconfiguration: a container-local SQLite
+            # file that works perfectly until the next redeploy wipes it.
+            "dialect": session.bind.dialect.name if session.bind else "unknown",
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
-        database_ok = True
-    except Exception as exc:  # noqa: BLE001 - readiness must report, not raise
-        logger.error("readiness database check failed: %s", exc)
-        checks["database"] = {"status": "error", "detail": type(exc).__name__}
-        database_ok = False
+    except Exception as exc:
+        ready = False
+        logger.error("readiness: database check failed: %s", exc)
+        checks["database"] = {"status": "error", "detail": str(exc)[:200]}
 
-    # Reported so a misconfigured production deploy is visible from outside.
-    checks["llm"] = {
-        "status": "ok" if settings.llm_enabled else "mock",
-        "provider": "sakana" if settings.llm_enabled else "mock",
-    }
-    checks["email"] = {"status": "ok", "backend": settings.email_backend}
+    # The AI provider is a soft dependency: with no key the deterministic
+    # provider serves requests, so the instance is still ready.
+    ai = get_ai_client().health()
+    checks["ai"] = {"status": "ok" if ai["configured"] else "degraded", **ai}
 
-    if not database_ok:
+    if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-
     return {
-        "status": "ready" if database_ok else "degraded",
-        "version": settings.release_version,
+        "status": "ready" if ready else "not_ready",
         "environment": settings.environment,
         "checks": checks,
     }
-
-
-__all__ = ["router"]
