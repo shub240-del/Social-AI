@@ -1,14 +1,7 @@
-"""Application error hierarchy.
+"""Application exception taxonomy.
 
-Every error the API returns is an ``AppError``. Each carries a stable machine
-``code`` alongside a human message, because clients need to branch on
-something that will not change when the wording is improved. The response
-envelope is always::
-
-    {"error": {"code": "...", "message": "...", "details": {...}}}
-
-Messages are written for end users and deliberately avoid leaking whether an
-account exists, which table failed, or what a token contained.
+Every error carries a stable machine-readable ``code`` so the frontend can
+branch on failures without string-matching human-readable messages.
 """
 
 from __future__ import annotations
@@ -17,11 +10,11 @@ from typing import Any
 
 
 class AppError(Exception):
-    """Base class for every expected failure."""
+    """Base class for all handled application errors."""
 
-    status_code: int = 400
-    code: str = "bad_request"
-    message: str = "The request could not be completed."
+    status_code: int = 500
+    code: str = "internal_error"
+    message: str = "An unexpected error occurred."
 
     def __init__(
         self,
@@ -32,36 +25,34 @@ class AppError(Exception):
         details: dict[str, Any] | None = None,
     ) -> None:
         self.message = message or self.message
-        if code is not None:
-            self.code = code
-        if status_code is not None:
-            self.status_code = status_code
+        self.code = code or self.code
+        self.status_code = status_code or self.status_code
         self.details = details or {}
         super().__init__(self.message)
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"code": self.code, "message": self.message}
+        payload: dict[str, Any] = {"error": {"code": self.code, "message": self.message}}
         if self.details:
-            payload["details"] = self.details
-        return {"error": payload}
+            payload["error"]["details"] = self.details
+        return payload
 
 
-# ---- 400 / 422 -------------------------------------------------------
+# ---- 400 family ------------------------------------------------------
 
 
 class ValidationError(AppError):
     status_code = 422
     code = "validation_error"
-    message = "The submitted data is not valid."
+    message = "The request payload is invalid."
 
 
-class ConflictError(AppError):
-    status_code = 409
-    code = "conflict"
-    message = "That resource already exists."
+class BadRequestError(AppError):
+    status_code = 400
+    code = "bad_request"
+    message = "The request could not be processed."
 
 
-# ---- 401 -------------------------------------------------------------
+# ---- auth ------------------------------------------------------------
 
 
 class AuthenticationError(AppError):
@@ -72,19 +63,7 @@ class AuthenticationError(AppError):
 
 class InvalidCredentialsError(AuthenticationError):
     code = "invalid_credentials"
-    # Identical for an unknown address and a wrong password, so the endpoint
-    # cannot be used to enumerate registered users.
-    message = "Incorrect email or password."
-
-
-class InvalidTokenError(AuthenticationError):
-    code = "invalid_token"
-    message = "This token is invalid."
-
-
-class TokenExpiredError(AuthenticationError):
-    code = "token_expired"
-    message = "This token has expired."
+    message = "Email or password is incorrect."
 
 
 class EmailNotVerifiedError(AuthenticationError):
@@ -92,29 +71,35 @@ class EmailNotVerifiedError(AuthenticationError):
     message = "Confirm your email address before logging in."
 
 
-# ---- 403 -------------------------------------------------------------
+class TokenExpiredError(AuthenticationError):
+    code = "token_expired"
+    message = "The access token has expired."
+
+
+class InvalidTokenError(AuthenticationError):
+    code = "invalid_token"
+    message = "The access token is invalid."
 
 
 class AuthorizationError(AppError):
     status_code = 403
     code = "forbidden"
-    message = "You do not have permission to do that."
+    message = "You do not have permission to perform this action."
 
 
-class PermissionDeniedError(AuthorizationError):
-    code = "permission_denied"
-
-
-# ---- 404 -------------------------------------------------------------
+# ---- resources -------------------------------------------------------
 
 
 class NotFoundError(AppError):
     status_code = 404
     code = "not_found"
-    message = "That resource does not exist."
+    message = "The requested resource was not found."
 
 
-# ---- 429 / 5xx -------------------------------------------------------
+class ConflictError(AppError):
+    status_code = 409
+    code = "conflict"
+    message = "The resource already exists."
 
 
 class RateLimitError(AppError):
@@ -123,45 +108,27 @@ class RateLimitError(AppError):
     message = "Too many requests. Please slow down."
 
 
-class LLMError(AppError):
+# ---- downstream ------------------------------------------------------
+
+
+class UpstreamError(AppError):
     status_code = 502
+    code = "upstream_error"
+    message = "An upstream service failed."
+
+
+class LLMError(UpstreamError):
     code = "llm_error"
-    message = "The AI provider could not complete this request."
+    message = "The AI provider could not complete the request."
 
 
 class LLMTimeoutError(LLMError):
     status_code = 504
     code = "llm_timeout"
-    message = "The AI provider took too long to respond."
+    message = "The AI provider timed out."
 
 
 class LLMRateLimitError(LLMError):
     status_code = 429
     code = "llm_rate_limited"
-    message = "The AI provider is rate limiting us. Please retry shortly."
-
-
-class LLMNotConfiguredError(LLMError):
-    status_code = 503
-    code = "llm_not_configured"
-    message = "No AI provider is configured."
-
-
-__all__ = [
-    "AppError",
-    "AuthenticationError",
-    "AuthorizationError",
-    "ConflictError",
-    "EmailNotVerifiedError",
-    "InvalidCredentialsError",
-    "InvalidTokenError",
-    "LLMError",
-    "LLMNotConfiguredError",
-    "LLMRateLimitError",
-    "LLMTimeoutError",
-    "NotFoundError",
-    "PermissionDeniedError",
-    "RateLimitError",
-    "TokenExpiredError",
-    "ValidationError",
-]
+    message = "The AI provider rate limit was reached. Try again shortly."

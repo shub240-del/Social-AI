@@ -1,140 +1,157 @@
-"""Registration, login, refresh, logout and identity.
-
-Refresh tokens rotate. Every token belongs to a *family* created at login;
-using one mints a replacement in the same family and marks the old one spent.
-Presenting an already-spent token means the value leaked, so the entire family
-is revoked — the attacker and the victim are both logged out, which is the
-correct outcome when you cannot tell which one is which.
-"""
+"""Registration, login, refresh, logout."""
 
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, status
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared_core.config import get_settings
-from packages.shared_core.db.base import new_uuid
-from packages.shared_core.db.models import Membership, RefreshToken, User
+from packages.shared_core.db.models import Membership, RefreshToken, User, Workspace
 from packages.shared_core.exceptions import (
+    ConflictError,
     EmailNotVerifiedError,
     InvalidCredentialsError,
     InvalidTokenError,
 )
-from packages.shared_core.security.passwords import verify_password
-from packages.shared_core.security.rbac import parse_role, permissions_for
+from packages.shared_core.security.passwords import hash_password, verify_password
+from packages.shared_core.security.roles import Role
 from services.identity_service.auth.dependencies import CurrentUser, SessionDep
 from services.identity_service.auth.tokens import (
     create_access_token,
     generate_refresh_token,
     hash_refresh_token,
 )
-from services.identity_service.routing import CommitRoute
+from services.identity_service.routers.account import send_verification_email
 from services.identity_service.schemas import (
     LoginRequest,
-    LogoutRequest,
     MeResponse,
-    MessageResponse,
     RefreshRequest,
     RegisterRequest,
-    RegisterResponse,
     TokenResponse,
-    UserResponse,
-    WorkspaceSummary,
+    UserOut,
+    WorkspaceOut,
 )
-from services.identity_service.services.user_provisioning import provision_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["auth"], route_class=CommitRoute)
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-async def _issue_refresh_token(
-    session: AsyncSession, user: User, *, family_id: str | None = None, request: Request | None = None
-) -> str:
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "workspace"
+
+
+async def _unique_slug(session, base: str) -> str:
+    slug = base
+    n = 1
+    while (
+        await session.execute(select(Workspace.id).where(Workspace.slug == slug))
+    ).first() is not None:
+        n += 1
+        slug = f"{base}-{n}"
+    return slug
+
+
+async def _issue_tokens(session, user: User, family_id: str | None = None) -> TokenResponse:
+    """Mint an access/refresh pair.
+
+    ``family_id`` is carried over when rotating so replay of any ancestor can
+    revoke every descendant. A fresh login starts a new family.
+    """
     settings = get_settings()
-    raw = generate_refresh_token()
+    access = create_access_token(user_id=user.id, email=user.email)
+    refresh = generate_refresh_token()
     session.add(
         RefreshToken(
             user_id=user.id,
-            token_hash=hash_refresh_token(raw),
-            family_id=family_id or new_uuid(),
-            expires_at=datetime.now(UTC) + timedelta(seconds=settings.refresh_token_ttl_seconds),
-            user_agent=(request.headers.get("user-agent", "")[:400] if request else None),
-            ip_address=(request.client.host if request and request.client else None),
+            token_hash=hash_refresh_token(refresh),
+            family_id=family_id or str(uuid.uuid4()),
+            expires_at=datetime.now(UTC)
+            + timedelta(seconds=settings.refresh_token_ttl_seconds),
         )
     )
-    return raw
-
-
-def _token_response(user: User, refresh: str) -> TokenResponse:
-    settings = get_settings()
     return TokenResponse(
-        access_token=create_access_token(user_id=user.id, email=user.email),
+        access_token=access,
         refresh_token=refresh,
         expires_in=settings.access_token_ttl_seconds,
     )
 
 
-@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
-async def register(
-    payload: RegisterRequest, session: SessionDep, request: Request
-) -> RegisterResponse:
-    user, _workspace = await provision_user(
-        session,
-        email=payload.email,
-        password=payload.password,
-        full_name=payload.full_name,
-    )
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register(payload: RegisterRequest, session: SessionDep) -> TokenResponse:
+    email = payload.email.lower()
+    existing = await session.execute(select(User.id).where(User.email == email))
+    if existing.first() is not None:
+        raise ConflictError("An account with that email already exists.")
 
-    # Delivery is best effort: a dead SMTP provider must not cost the signup.
-    # Imported here so tests can monkeypatch the symbol on this module.
+    user = User(
+        email=email,
+        full_name=payload.full_name.strip(),
+        hashed_password=hash_password(payload.password),
+    )
+    session.add(user)
+    await session.flush()
+
+    # Every user gets a workspace, so the product is usable immediately after
+    # registration rather than dead-ending on an empty dashboard.
+    ws_name = (payload.workspace_name or "").strip() or (
+        f"{payload.full_name.strip().split(' ')[0]}'s Workspace"
+        if payload.full_name.strip()
+        else "My Workspace"
+    )
+    workspace = Workspace(
+        name=ws_name,
+        slug=await _unique_slug(session, _slugify(ws_name)),
+        owner_id=user.id,
+    )
+    session.add(workspace)
+    await session.flush()
+    session.add(Membership(user_id=user.id, workspace_id=workspace.id, role=Role.OWNER.value))
+
+    tokens = await _issue_tokens(session, user)
+    await session.flush()
+
+    # Send the confirmation link now. A failure here must not lose the account
+    # the user just created - they can always request another link.
     try:
-        from services.identity_service.routers.account import send_verification_email
-
         await send_verification_email(session, user)
-    except Exception:  # noqa: BLE001
-        logger.exception("could not send the verification email for %s", user.email)
+    except Exception:  # noqa: BLE001 - delivery is best-effort at signup
+        logger.warning("could not send the verification email", extra={"user_id": user.id})
 
-    refresh = await _issue_refresh_token(session, user, request=request)
-    tokens = _token_response(user, refresh)
-    return RegisterResponse(
-        **tokens.model_dump(), user=UserResponse.model_validate(user)
-    )
+    return tokens
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, session: SessionDep, request: Request) -> TokenResponse:
-    settings = get_settings()
+async def login(payload: LoginRequest, session: SessionDep) -> TokenResponse:
     result = await session.execute(select(User).where(User.email == payload.email.lower()))
     user = result.scalar_one_or_none()
 
-    # verify_password runs even when the user is missing so that a wrong
-    # address and a wrong password take a similar amount of time.
-    if user is None or not verify_password(payload.password, user.hashed_password):
-        if user is None:
-            verify_password(payload.password, None)
+    # Always run a verification so the response time does not reveal whether
+    # the email exists.
+    if not verify_password(payload.password, user.hashed_password if user else None):
+        raise InvalidCredentialsError()
+    if user is None or not user.is_active:
         raise InvalidCredentialsError()
 
-    if not user.is_active:
-        raise InvalidCredentialsError()
-
-    if settings.require_email_verification and user.email_verified_at is None:
+    # Gated behind a flag: turning this on before an SMTP backend is wired up
+    # would lock every existing user out of their account.
+    if get_settings().require_email_verification and user.email_verified_at is None:
         raise EmailNotVerifiedError()
 
     user.last_login_at = datetime.now(UTC)
-    refresh = await _issue_refresh_token(session, user, request=request)
-    return _token_response(user, refresh)
+    tokens = await _issue_tokens(session, user)
+    await session.flush()
+    return tokens
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_tokens(
-    payload: RefreshRequest, session: SessionDep, request: Request
-) -> TokenResponse:
+async def refresh(payload: RefreshRequest, session: SessionDep) -> TokenResponse:
     token_hash = hash_refresh_token(payload.refresh_token)
     result = await session.execute(
         select(RefreshToken).where(RefreshToken.token_hash == token_hash)
@@ -143,131 +160,72 @@ async def refresh_tokens(
     now = datetime.now(UTC)
 
     if stored is None:
-        raise InvalidTokenError("That refresh token is not valid.")
+        raise InvalidTokenError("Refresh token is invalid or has been revoked.")
 
+    if stored.revoked_at is not None:
+        # Replay: someone else already spent this token. We cannot tell the
+        # thief from the victim, so every live token in the family dies and
+        # both parties must log in again.
+        await session.execute(
+            update(RefreshToken)
+            .where(
+                RefreshToken.family_id == stored.family_id,
+                RefreshToken.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+        )
+        # Commit before raising. The session dependency rolls back on any
+        # exception, which would silently discard this revocation and leave
+        # the stolen session alive - the exact failure this code prevents.
+        await session.commit()
+        logger.warning(
+            "refresh token replay detected; revoked family",
+            extra={"user_id": stored.user_id, "family_id": stored.family_id},
+        )
+        raise InvalidTokenError("Refresh token is invalid or has been revoked.")
     expires_at = stored.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-
-    # Replay: this token was already exchanged. Burn the whole family.
-    if stored.rotated_to is not None:
-        logger.warning(
-            "refresh token replay detected; revoking family",
-            extra={"user_id": stored.user_id, "family_id": stored.family_id},
-        )
-        await session.execute(
-            update(RefreshToken)
-            .where(
-                RefreshToken.family_id == stored.family_id,
-                RefreshToken.revoked_at.is_(None),
-            )
-            .values(revoked_at=now)
-        )
-        # Commit before raising. The request-scoped session rolls back on any
-        # exception, which would undo the revocation we just performed and
-        # leave the leaked family usable — the exact opposite of the intent.
-        await session.commit()
-        raise InvalidTokenError("This session has been revoked. Please log in again.")
-
-    if stored.revoked_at is not None:
-        raise InvalidTokenError("This session has been revoked. Please log in again.")
     if expires_at <= now:
-        raise InvalidTokenError("This session has expired. Please log in again.")
+        raise InvalidTokenError("Refresh token has expired.")
 
     user = await session.get(User, stored.user_id)
     if user is None or not user.is_active:
-        raise InvalidTokenError("This account is no longer active.")
+        raise InvalidTokenError("Account is inactive.")
 
-    replacement = await _issue_refresh_token(
-        session, user, family_id=stored.family_id, request=request
-    )
-    stored.rotated_to = hash_refresh_token(replacement)
+    # Rotation: the presented token is consumed as the replacement is issued,
+    # so a stolen refresh token is usable at most once.
     stored.revoked_at = now
-    return _token_response(user, replacement)
+    tokens = await _issue_tokens(session, user, family_id=stored.family_id)
+    await session.flush()
+    return tokens
 
 
-@router.post("/logout", response_model=MessageResponse)
-async def logout(
-    payload: LogoutRequest, user: CurrentUser, session: SessionDep
-) -> MessageResponse:
-    now = datetime.now(UTC)
-    if payload.all_sessions or not payload.refresh_token:
-        await session.execute(
-            update(RefreshToken)
-            .where(RefreshToken.user_id == user.user_id, RefreshToken.revoked_at.is_(None))
-            .values(revoked_at=now)
-        )
-        return MessageResponse(message="Signed out of every device.")
-
-    # Revoke the family so the rotated descendants die with it.
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def logout(payload: RefreshRequest, session: SessionDep) -> None:
     result = await session.execute(
         select(RefreshToken).where(
-            RefreshToken.token_hash == hash_refresh_token(payload.refresh_token),
-            RefreshToken.user_id == user.user_id,
+            RefreshToken.token_hash == hash_refresh_token(payload.refresh_token)
         )
     )
     stored = result.scalar_one_or_none()
-    if stored is not None:
-        await session.execute(
-            update(RefreshToken)
-            .where(
-                RefreshToken.family_id == stored.family_id,
-                RefreshToken.revoked_at.is_(None),
-            )
-            .values(revoked_at=now)
-        )
-    return MessageResponse(message="Signed out.")
+    # Idempotent: logging out with an unknown token still succeeds.
+    if stored is not None and stored.revoked_at is None:
+        stored.revoked_at = datetime.now(UTC)
 
 
 @router.get("/me", response_model=MeResponse)
-async def me(user: CurrentUser, session: SessionDep) -> MeResponse:
-    db_user = await session.get(User, user.user_id)
-    if db_user is None:
-        raise InvalidTokenError("This account no longer exists.")
-
-    result = await session.execute(
-        select(Membership).where(Membership.user_id == user.user_id)
+async def me(ctx: CurrentUser, session: SessionDep) -> MeResponse:
+    user = await session.get(User, ctx.user_id)
+    assert user is not None  # guaranteed by get_current_context
+    rows = await session.execute(
+        select(Workspace, Membership.role)
+        .join(Membership, Membership.workspace_id == Workspace.id)
+        .where(Membership.user_id == ctx.user_id)
+        .order_by(Workspace.created_at)
     )
-    memberships = list(result.scalars())
-
     workspaces = [
-        WorkspaceSummary(
-            id=m.workspace.id, name=m.workspace.name, slug=m.workspace.slug, role=m.role
-        )
-        for m in memberships
-        if m.workspace is not None
+        WorkspaceOut(**WorkspaceOut.model_validate(ws).model_dump(exclude={"role"}), role=role)
+        for ws, role in rows.all()
     ]
-    workspaces.sort(key=lambda w: w.name.lower())
-
-    permissions: set[str] = set()
-    for m in memberships:
-        permissions.update(str(p) for p in permissions_for(parse_role(m.role)))
-
-    return MeResponse(
-        **UserResponse.model_validate(db_user).model_dump(),
-        workspaces=workspaces,
-        permissions=sorted(permissions),
-    )
-
-
-@router.get("/sessions", response_model=list[dict[str, Any]])
-async def list_sessions(user: CurrentUser, session: SessionDep) -> list[dict[str, Any]]:
-    """Active sessions, so a user can spot one they do not recognise."""
-    result = await session.execute(
-        select(RefreshToken)
-        .where(RefreshToken.user_id == user.user_id, RefreshToken.revoked_at.is_(None))
-        .order_by(RefreshToken.created_at.desc())
-    )
-    return [
-        {
-            "id": t.id,
-            "created_at": t.created_at,
-            "expires_at": t.expires_at,
-            "user_agent": t.user_agent,
-            "ip_address": t.ip_address,
-        }
-        for t in result.scalars()
-    ]
-
-
-__all__ = ["router", "Response"]
+    return MeResponse(user=UserOut.model_validate(user), workspaces=workspaces)

@@ -1,216 +1,178 @@
-"""Workspaces and their members.
-
-Every handler that touches a specific workspace depends on
-``WorkspaceContext``, which has already proven membership. A handler therefore
-never filters by ``user_id`` itself — that duplication is exactly where
-cross-tenant bugs come from.
-"""
+"""Workspace and membership management."""
 
 from __future__ import annotations
 
-import logging
-from typing import Annotated, Any
+import re
 
-from fastapi import APIRouter, Depends, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, status
+from sqlalchemy import select
 
-from packages.shared_core.db.models import Brand, Campaign, Membership, User, Workspace
-from packages.shared_core.exceptions import (
-    ConflictError,
-    NotFoundError,
-    PermissionDeniedError,
-    ValidationError,
+from packages.shared_core.db.models import Membership, User, Workspace
+from packages.shared_core.exceptions import ConflictError, NotFoundError, ValidationError
+from packages.shared_core.security.rbac import (
+    assert_can_assign_role,
+    assert_member,
+    assert_permission,
 )
-from packages.shared_core.security.rbac import Permission, Role, UserContext, outranks, parse_role
-from services.identity_service.auth.dependencies import (
-    CurrentUser,
-    SessionDep,
-    WorkspaceContext,
-    requires,
-)
-from services.identity_service.routing import CommitRoute
+from packages.shared_core.security.roles import Permission, Role
+from services.identity_service.auth.dependencies import CurrentUser, SessionDep
 from services.identity_service.schemas import (
     MemberInvite,
-    MemberResponse,
+    MemberOut,
     MemberRoleUpdate,
-    MessageResponse,
     WorkspaceCreate,
-    WorkspaceResponse,
+    WorkspaceOut,
     WorkspaceUpdate,
 )
-from services.identity_service.services.user_provisioning import create_workspace, unique_slug
 
-logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/workspaces", tags=["workspaces"], route_class=CommitRoute)
+router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 
-@router.get("", response_model=list[WorkspaceResponse])
-async def list_workspaces(user: CurrentUser, session: SessionDep) -> list[WorkspaceResponse]:
-    result = await session.execute(
-        select(Membership, Workspace)
-        .join(Workspace, Workspace.id == Membership.workspace_id)
-        .where(Membership.user_id == user.user_id)
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "workspace"
+
+
+async def _unique_slug(session, base: str) -> str:
+    slug, n = base, 1
+    while (
+        await session.execute(select(Workspace.id).where(Workspace.slug == slug))
+    ).first() is not None:
+        n += 1
+        slug = f"{base}-{n}"
+    return slug
+
+
+async def _get_scoped(session, ctx, workspace_id: str) -> Workspace:
+    """Load a workspace the caller is permitted to see, else 404."""
+    assert_member(ctx, workspace_id)
+    ws = await session.get(Workspace, workspace_id)
+    if ws is None:
+        raise NotFoundError("Workspace not found.")
+    return ws
+
+
+@router.get("", response_model=list[WorkspaceOut])
+async def list_workspaces(ctx: CurrentUser, session: SessionDep) -> list[WorkspaceOut]:
+    rows = await session.execute(
+        select(Workspace, Membership.role)
+        .join(Membership, Membership.workspace_id == Workspace.id)
+        .where(Membership.user_id == ctx.user_id)
         .order_by(Workspace.created_at)
     )
     return [
-        WorkspaceResponse(
-            **{
-                k: getattr(workspace, k)
-                for k in ("id", "name", "slug", "description", "owner_id", "created_at")
-            },
-            role=membership.role,
+        WorkspaceOut(
+            **WorkspaceOut.model_validate(ws).model_dump(exclude={"role"}), role=role
         )
-        for membership, workspace in result.all()
+        for ws, role in rows.all()
     ]
 
 
-@router.post("", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED)
-async def create(
-    payload: WorkspaceCreate, user: CurrentUser, session: SessionDep
-) -> WorkspaceResponse:
-    owner = await session.get(User, user.user_id)
-    if owner is None:
-        raise NotFoundError("Your account could not be loaded.")
-    workspace = await create_workspace(
-        session, owner=owner, name=payload.name, description=payload.description
+@router.post("", response_model=WorkspaceOut, status_code=status.HTTP_201_CREATED)
+async def create_workspace(
+    payload: WorkspaceCreate, ctx: CurrentUser, session: SessionDep
+) -> WorkspaceOut:
+    ws = Workspace(
+        name=payload.name.strip(),
+        slug=await _unique_slug(session, _slugify(payload.name)),
+        owner_id=ctx.user_id,
     )
-    return WorkspaceResponse.model_validate(workspace).model_copy(update={"role": str(Role.OWNER)})
-
-
-@router.get("/{workspace_id}", response_model=WorkspaceResponse)
-async def get_one(workspace_id: str, context: WorkspaceContext, session: SessionDep) -> WorkspaceResponse:
-    workspace = await session.get(Workspace, workspace_id)
-    if workspace is None:
-        raise NotFoundError("That workspace does not exist.")
-    return WorkspaceResponse.model_validate(workspace).model_copy(
-        update={"role": str(context.role)}
-    )
-
-
-@router.patch("/{workspace_id}", response_model=WorkspaceResponse)
-async def update(
-    workspace_id: str,
-    payload: WorkspaceUpdate,
-    session: SessionDep,
-    context: Annotated[UserContext, Depends(requires(Permission.WORKSPACE_UPDATE))],
-) -> WorkspaceResponse:
-    workspace = await session.get(Workspace, workspace_id)
-    if workspace is None:
-        raise NotFoundError("That workspace does not exist.")
-
-    if payload.name is not None and payload.name != workspace.name:
-        workspace.name = payload.name
-        workspace.slug = await unique_slug(session, workspace.owner_id, payload.name)
-    if payload.description is not None:
-        workspace.description = payload.description
+    session.add(ws)
     await session.flush()
-    return WorkspaceResponse.model_validate(workspace).model_copy(
-        update={"role": str(context.role)}
+    session.add(Membership(user_id=ctx.user_id, workspace_id=ws.id, role=Role.OWNER.value))
+    await session.flush()
+    return WorkspaceOut(
+        **WorkspaceOut.model_validate(ws).model_dump(exclude={"role"}), role=Role.OWNER.value
     )
 
 
-@router.delete("/{workspace_id}", response_model=MessageResponse)
-async def delete(
-    workspace_id: str,
-    user: CurrentUser,
-    session: SessionDep,
-    context: Annotated[UserContext, Depends(requires(Permission.WORKSPACE_DELETE))],
-) -> MessageResponse:
-    workspace = await session.get(Workspace, workspace_id)
-    if workspace is None:
-        raise NotFoundError("That workspace does not exist.")
-
-    # Losing your only workspace leaves the dashboard unusable with no way to
-    # recover from the UI.
-    remaining = await session.execute(
-        select(func.count(Membership.id)).where(Membership.user_id == user.user_id)
+@router.get("/{workspace_id}", response_model=WorkspaceOut)
+async def get_workspace(
+    workspace_id: str, ctx: CurrentUser, session: SessionDep
+) -> WorkspaceOut:
+    ws = await _get_scoped(session, ctx, workspace_id)
+    return WorkspaceOut(
+        **WorkspaceOut.model_validate(ws).model_dump(exclude={"role"}),
+        role=ctx.role_in(workspace_id),
     )
-    if (remaining.scalar_one() or 0) <= 1:
-        raise ValidationError("You cannot delete your only workspace.")
-
-    await session.delete(workspace)
-    return MessageResponse(message="Workspace deleted.")
 
 
-@router.get("/{workspace_id}/stats")
-async def stats(workspace_id: str, context: WorkspaceContext, session: SessionDep) -> dict[str, int]:
-    async def count(model: type[Any]) -> int:
-        result = await session.execute(
-            select(func.count(model.id)).where(model.workspace_id == workspace_id)
-        )
-        return int(result.scalar_one() or 0)
-
-    members = await session.execute(
-        select(func.count(Membership.id)).where(Membership.workspace_id == workspace_id)
+@router.patch("/{workspace_id}", response_model=WorkspaceOut)
+async def update_workspace(
+    workspace_id: str, payload: WorkspaceUpdate, ctx: CurrentUser, session: SessionDep
+) -> WorkspaceOut:
+    ws = await _get_scoped(session, ctx, workspace_id)
+    assert_permission(ctx, workspace_id, Permission.WORKSPACE_UPDATE)
+    ws.name = payload.name.strip()
+    await session.flush()
+    return WorkspaceOut(
+        **WorkspaceOut.model_validate(ws).model_dump(exclude={"role"}),
+        role=ctx.role_in(workspace_id),
     )
-    return {
-        "brands": await count(Brand),
-        "campaigns": await count(Campaign),
-        "members": int(members.scalar_one() or 0),
-    }
 
 
-# ---- members ----------------------------------------------------------
+@router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def delete_workspace(workspace_id: str, ctx: CurrentUser, session: SessionDep) -> None:
+    ws = await _get_scoped(session, ctx, workspace_id)
+    assert_permission(ctx, workspace_id, Permission.WORKSPACE_DELETE)
+    await session.delete(ws)
 
 
-@router.get("/{workspace_id}/members", response_model=list[MemberResponse])
+# ---- members ---------------------------------------------------------
+
+
+@router.get("/{workspace_id}/members", response_model=list[MemberOut])
 async def list_members(
-    workspace_id: str,
-    session: SessionDep,
-    context: Annotated[UserContext, Depends(requires(Permission.MEMBER_READ))],
-) -> list[MemberResponse]:
-    result = await session.execute(
+    workspace_id: str, ctx: CurrentUser, session: SessionDep
+) -> list[MemberOut]:
+    await _get_scoped(session, ctx, workspace_id)
+    assert_permission(ctx, workspace_id, Permission.MEMBER_READ)
+    rows = await session.execute(
         select(Membership, User)
         .join(User, User.id == Membership.user_id)
         .where(Membership.workspace_id == workspace_id)
-        .order_by(User.email)
+        .order_by(Membership.created_at)
     )
     return [
-        MemberResponse(
-            user_id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            role=membership.role,
-            joined_at=membership.created_at,
+        MemberOut(
+            user_id=u.id,
+            email=u.email,
+            full_name=u.full_name,
+            role=m.role,
+            joined_at=m.created_at,
         )
-        for membership, user in result.all()
+        for m, u in rows.all()
     ]
 
 
 @router.post(
-    "/{workspace_id}/members", response_model=MemberResponse, status_code=status.HTTP_201_CREATED
+    "/{workspace_id}/members", response_model=MemberOut, status_code=status.HTTP_201_CREATED
 )
 async def add_member(
-    workspace_id: str,
-    payload: MemberInvite,
-    session: SessionDep,
-    context: Annotated[UserContext, Depends(requires(Permission.MEMBER_INVITE))],
-) -> MemberResponse:
-    target_role = parse_role(payload.role)
-    # You may only grant a role strictly below your own. Without this an admin
-    # could grant owner and then be removed by the account they just created.
-    if context.role is None or not outranks(context.role, target_role):
-        raise PermissionDeniedError("You cannot grant a role at or above your own.")
+    workspace_id: str, payload: MemberInvite, ctx: CurrentUser, session: SessionDep
+) -> MemberOut:
+    await _get_scoped(session, ctx, workspace_id)
+    assert_permission(ctx, workspace_id, Permission.MEMBER_INVITE)
+    assert_can_assign_role(ctx, workspace_id, payload.role)
 
     result = await session.execute(select(User).where(User.email == payload.email.lower()))
     user = result.scalar_one_or_none()
     if user is None:
-        # Not an enumeration risk: the caller is already a trusted member here.
-        raise NotFoundError("No account with that email exists yet. Ask them to sign up first.")
+        raise NotFoundError("No account exists with that email address.")
 
-    existing = await session.execute(
-        select(Membership).where(
+    dupe = await session.execute(
+        select(Membership.id).where(
             Membership.workspace_id == workspace_id, Membership.user_id == user.id
         )
     )
-    if existing.scalar_one_or_none() is not None:
-        raise ConflictError("That person is already a member of this workspace.")
+    if dupe.first() is not None:
+        raise ConflictError("That user is already a member of this workspace.")
 
-    membership = Membership(user_id=user.id, workspace_id=workspace_id, role=str(target_role))
+    membership = Membership(
+        user_id=user.id, workspace_id=workspace_id, role=payload.role.value
+    )
     session.add(membership)
     await session.flush()
-    return MemberResponse(
+    return MemberOut(
         user_id=user.id,
         email=user.email,
         full_name=user.full_name,
@@ -219,14 +181,17 @@ async def add_member(
     )
 
 
-@router.patch("/{workspace_id}/members/{user_id}", response_model=MemberResponse)
+@router.patch("/{workspace_id}/members/{user_id}", response_model=MemberOut)
 async def update_member_role(
     workspace_id: str,
     user_id: str,
     payload: MemberRoleUpdate,
+    ctx: CurrentUser,
     session: SessionDep,
-    context: Annotated[UserContext, Depends(requires(Permission.MEMBER_ROLE_UPDATE))],
-) -> MemberResponse:
+) -> MemberOut:
+    ws = await _get_scoped(session, ctx, workspace_id)
+    assert_can_assign_role(ctx, workspace_id, payload.role)
+
     result = await session.execute(
         select(Membership, User)
         .join(User, User.id == Membership.user_id)
@@ -234,25 +199,15 @@ async def update_member_role(
     )
     row = result.first()
     if row is None:
-        raise NotFoundError("That person is not a member of this workspace.")
+        raise NotFoundError("That user is not a member of this workspace.")
     membership, user = row
 
-    current = parse_role(membership.role)
-    target = parse_role(payload.role)
-    if (
-        context.role is not None
-        and context.role != Role.OWNER
-        and (not outranks(context.role, current) or not outranks(context.role, target))
-    ):
-        raise PermissionDeniedError("You cannot change a role at or above your own.")
+    if user_id == ws.owner_id and payload.role != Role.OWNER:
+        raise ValidationError("The workspace owner's role cannot be downgraded.")
 
-    workspace = await session.get(Workspace, workspace_id)
-    if workspace is not None and workspace.owner_id == user_id and target != Role.OWNER:
-        raise ValidationError("Transfer ownership before demoting the workspace owner.")
-
-    membership.role = str(target)
+    membership.role = payload.role.value
     await session.flush()
-    return MemberResponse(
+    return MemberOut(
         user_id=user.id,
         email=user.email,
         full_name=user.full_name,
@@ -261,17 +216,16 @@ async def update_member_role(
     )
 
 
-@router.delete("/{workspace_id}/members/{user_id}", response_model=MessageResponse)
+@router.delete(
+    "/{workspace_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None
+)
 async def remove_member(
-    workspace_id: str,
-    user_id: str,
-    session: SessionDep,
-    context: Annotated[UserContext, Depends(requires(Permission.MEMBER_REMOVE))],
-) -> MessageResponse:
-    workspace = await session.get(Workspace, workspace_id)
-    if workspace is not None and workspace.owner_id == user_id:
+    workspace_id: str, user_id: str, ctx: CurrentUser, session: SessionDep
+) -> None:
+    ws = await _get_scoped(session, ctx, workspace_id)
+    assert_permission(ctx, workspace_id, Permission.MEMBER_REMOVE)
+    if user_id == ws.owner_id:
         raise ValidationError("The workspace owner cannot be removed.")
-
     result = await session.execute(
         select(Membership).where(
             Membership.workspace_id == workspace_id, Membership.user_id == user_id
@@ -279,17 +233,5 @@ async def remove_member(
     )
     membership = result.scalar_one_or_none()
     if membership is None:
-        raise NotFoundError("That person is not a member of this workspace.")
-
-    if (
-        context.role is not None
-        and context.role != Role.OWNER
-        and not outranks(context.role, parse_role(membership.role))
-    ):
-        raise PermissionDeniedError("You cannot remove a member at or above your own role.")
-
+        raise NotFoundError("That user is not a member of this workspace.")
     await session.delete(membership)
-    return MessageResponse(message="Member removed.")
-
-
-__all__ = ["router"]

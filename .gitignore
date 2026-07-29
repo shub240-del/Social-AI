@@ -1,58 +1,34 @@
-# Node / JavaScript / TypeScript
-node_modules/
-.next/
-*.tsbuildinfo
-# pnpm is the package manager for this workspace; an npm or yarn lockfile
-# alongside pnpm-lock.yaml resolves a different dependency tree.
-package-lock.json
-yarn.lock
-dist/
-build/
-.turbo/
-coverage/
-*.log
-
 # Python
 __pycache__/
+
+# Artefacts left behind by `pip install .`, which the Dockerfile and CI both run.
+build/
+dist/
+*.egg-info/
 *.py[cod]
-*$py.class
 .venv/
 venv/
-ENV/
 .pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-# Local sqlite databases created by the dev server, the test suite and CI.
-*.db
-*.sqlite
-*.sqlite3
-.mypy_cache/
 .ruff_cache/
-*.egg-info/
-.eggs/
+.coverage
+htmlcov/
+*.db
 
-# Environment and Secrets
-# NOTE: this block was the cause of the .env.production credential leak.
-# The previous list enumerated .env.local / .env.*.local but NOT .env.production,
-# so .env.production was tracked by git. Deny-all-then-allow is the only safe shape.
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Secrets — deny by default, then allow the templates back in.
 .env
 .env.*
 !.env.example
-!.env.*.example
+!.env.local.example
 *.pem
-*.key
-*.p12
-*.pfx
-secrets.json
+!tests/fixtures/*.pem
 
-# IDEs & System
-.vscode/
-.idea/
+# OS / editor
 .DS_Store
-Thumbs.db
-
-# OS / Scratch
-scratch/
-tmp/
+.idea/
+.vscode/

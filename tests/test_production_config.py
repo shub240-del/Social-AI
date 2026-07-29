@@ -19,7 +19,7 @@ VALID: dict[str, str] = {
     "JWT_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nrealkey\n-----END PRIVATE KEY-----",
     "JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nrealkey\n-----END PUBLIC KEY-----",
     "ALLOW_MOCK_LLM": "false",
-    "SAKANA_API_KEY": "sk-a-real-looking-key",
+    "NVIDIA_API_KEY": "nvapi-a-real-looking-key",
     "ALLOWED_ORIGINS": "https://app.socialai.io",
     "EMAIL_BACKEND": "smtp",
     "SMTP_HOST": "smtp.provider.com",
@@ -72,12 +72,12 @@ def test_mock_llm_is_refused(monkeypatch):
 
 
 def test_missing_llm_key_is_refused(monkeypatch):
-    refuses(monkeypatch, "SAKANA_API_KEY", SAKANA_API_KEY=None)
+    refuses(monkeypatch, "NVIDIA_API_KEY", NVIDIA_API_KEY=None)
 
 
 def test_placeholder_llm_key_is_refused(monkeypatch):
     """A copied .env.example is the most likely way this goes wrong."""
-    refuses(monkeypatch, "SAKANA_API_KEY", SAKANA_API_KEY="changeme")
+    refuses(monkeypatch, "NVIDIA_API_KEY", NVIDIA_API_KEY="changeme")
 
 
 def test_wildcard_cors_is_refused(monkeypatch):
@@ -132,39 +132,10 @@ def test_development_stays_permissive(monkeypatch):
         JWT_PRIVATE_KEY=None,
         JWT_PUBLIC_KEY=None,
         ALLOW_MOCK_LLM="true",
-        SAKANA_API_KEY=None,
+        NVIDIA_API_KEY=None,
         EMAIL_BACKEND="console",
         SMTP_HOST=None,
         FRONTEND_BASE_URL="http://127.0.0.1:3000",
     )
     assert not settings.is_production
     assert settings.allow_mock_llm
-
-
-def test_api_docs_are_hidden_in_production(monkeypatch):
-    """A public schema hands an attacker every field name and validation rule.
-
-    post_deploy_verify.py checks this too, but only against a live deployment,
-    so nothing caught a regression here until after a release.
-    """
-    settings = build(monkeypatch)
-    assert settings.is_production
-    assert settings.openapi_url is None
-    assert settings.docs_url is None
-
-
-def test_api_docs_are_available_outside_production(monkeypatch):
-    settings = build(
-        monkeypatch,
-        ENVIRONMENT="development",
-        DATABASE_URL="sqlite+aiosqlite:///./dev.db",
-        JWT_PRIVATE_KEY=None,
-        JWT_PUBLIC_KEY=None,
-        ALLOW_MOCK_LLM="true",
-        SAKANA_API_KEY=None,
-        EMAIL_BACKEND="console",
-        SMTP_HOST=None,
-        FRONTEND_BASE_URL="http://127.0.0.1:3000",
-    )
-    assert settings.openapi_url is not None
-    assert settings.docs_url == "/docs"

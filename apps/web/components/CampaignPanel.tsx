@@ -12,13 +12,6 @@ const STATUS_STYLES: Record<string, string> = {
   completed: 'bg-indigo-500/15 text-indigo-300',
 };
 
-/**
- * Create and list the campaigns of a workspace.
- *
- * The API and the client library have supported campaigns since the first
- * release, but nothing rendered them, so the objective a campaign carries
- * could never reach the model. This panel is what makes that reachable.
- */
 export function CampaignPanel({
   workspaceId,
   campaigns,
@@ -37,13 +30,13 @@ export function CampaignPanel({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim() || busy) return;
+    if (!form.name.trim()) return;
     setBusy(true);
     setError(null);
     try {
       await api.createCampaign(workspaceId, {
         name: form.name.trim(),
-        objective: form.objective.trim(),
+        objective: form.objective,
         brand_id: form.brand_id || undefined,
       });
       setForm({ name: '', objective: '', brand_id: '' });
@@ -58,10 +51,9 @@ export function CampaignPanel({
 
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-xs uppercase tracking-wide text-slate-500">Campaigns</h2>
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="label mb-0">Campaigns</h2>
         <button
-          type="button"
           className="btn-ghost px-2 py-1"
           onClick={() => setOpen((v) => !v)}
           aria-label="New campaign"
@@ -72,7 +64,7 @@ export function CampaignPanel({
       </div>
 
       {open && (
-        <form onSubmit={submit} className="mb-3 space-y-2 rounded-lg border border-slate-800 p-3">
+        <form onSubmit={submit} className="mb-4 space-y-2 rounded-lg border border-ink-600 p-3">
           <ErrorBanner message={error} />
           <input
             className="input"

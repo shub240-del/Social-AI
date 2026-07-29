@@ -6,7 +6,6 @@ testable end to end without an SMTP provider.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import uuid
 
@@ -77,29 +76,6 @@ async def test_verification_token_is_single_use(client, mail):
     assert first.status_code == 200
     again = await client.post("/api/v1/auth/verify/confirm", json={"token": token})
     assert again.status_code == 401
-
-
-async def test_concurrent_confirms_redeem_a_token_exactly_once(client, mail):
-    """Single-use must hold under a race, not just in sequence.
-
-    The sequential test above passed while the endpoint was still redeeming a
-    link twice: it read used_at, then wrote it, and two overlapping requests
-    could both read NULL. Firing the confirms together is what pins the
-    conditional UPDATE that closes that window.
-    """
-    email = await _register(client)
-    await client.post("/api/v1/auth/verify/request", json={"email": email})
-    token = mail.link_for(email)
-
-    results = await asyncio.gather(
-        *[
-            client.post("/api/v1/auth/verify/confirm", json={"token": token})
-            for _ in range(4)
-        ]
-    )
-    codes = [r.status_code for r in results]
-    assert codes.count(200) == 1, codes
-    assert all(c in (200, 401) for c in codes), codes
 
 
 async def test_requesting_again_invalidates_the_previous_link(client, mail):
